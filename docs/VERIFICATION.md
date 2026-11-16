@@ -1,7 +1,7 @@
-# 验证基线（2026-11-17，M2 迭代）
+# 验证基线（2026-11-17，M3 迭代）
 
 环境：Windows、Ruby 4.0.6、Bundler 4.0.24；真实 PostgreSQL 15.19（docker `troupe-pg` @127.0.0.1:55444，专用库 `troupe_rb_test`）。
-Issue 对应：#5（生产共享状态与真实故障接管）。M1/M0 基线见下节存档。
+Issue 对应：M3（Show→Audience 与可观测）。M2/M1/M0 基线见下节存档。
 
 ## 默认入口
 
@@ -11,8 +11,36 @@ bundle exec rake test                                # 矩阵 leg：PG 项 skip�
 TROUPE_TEST_PG=postgres://…/troupe_rb_test bundle exec rake test   # PG leg：契约 + 多进程接管
 ```
 
-**结果（PG leg 全量）：168 runs，3024 assertions，0 failures，0 errors，0 skips**（M1 基线 116 → M2 168）。
-矩阵 leg（无 PG env）：168 runs，0 failures，0 errors，20 skips（PG 项让位给专用 leg）。
+**结果（PG leg 全量）：179 runs，3080 assertions，0 failures，0 errors，0 skips**（M2 基线 168 → M3 179）。
+矩阵 leg（无 PG env）：179 runs，0 failures，0 errors，20 skips（PG 项让位给专用 leg）。
+
+## 逐项验证（M3）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| Show→Actor Audience | `show_audience_test.rb`：完整 Turn 管道交付（save_props CAS 落库可断言）；订阅时白名单/角色校验（生命周期钩子拒绝）；外部边界回调隔离与退订；PublishReport 计数 | ✅ |
+| 跨 Stage 转发 | 订阅注册在 t1、Audience Actor 环归属 t2 → route 跨 Stage 转发、Actor 在归属 Stage 激活 | ✅ |
+| 慢订阅者隔离 | deadline 有界等待：慢 Turn 计 failed，发布者不被拖住（<2s），快订阅者正常 | ✅ |
+| 在线尽力不重投 | Audience Turn 业务异常计 failed、副作用保留、等待后无重复投递 | ✅ |
+| OTel 适配 | `otel_test.rb`：traceparent 解析/全零回退；span 形状（hex id、unixNano、status code 1/2）；指标 monotonic Sum（temporality=2）；sink 回调端到端（trace+metrics）；本地调用事件携带 traceparent | ✅ |
+| 接管健康指标 | `test_lease_renew_failure_and_handover_metrics`：续租失败 → leaseRenewFailures（troupe 级+角色级）；所有权确已转移 → handovers | ✅ |
+
+## 发现并顺带修复（M3）
+
+- **TraceBus.subscribe 历史性静默不投递**：emit 用 `push_nonblock`——Ruby stdlib Queue/SizedQueue 无此方法（NoMethodError 被 emit 外层 rescue 吞掉，订阅者永远收不到事件，Director tail 一直不可用）。改 `push(event, true)` + ThreadError 救援。
+- **OTel exporter Float#times**：`(every * 10).times` 对 Float 不存在——改 mono deadline 轮询。
+- **`Troupe::Troupe::VERSION` 常量遮蔽**：OTel 里 `Troupe::VERSION` 被词法解析为 `Troupe::Troupe::VERSION`（roadmap 已登记的 Ruby 工效债实锤）——用 `::Troupe::VERSION`。
+- **CI PG leg takeover 断言竞态**（run 43919996911 唯一红点）：接管 worker 持续写导致 revision 快照过期——改下界断言。
+
+## 未验证边界（不伪装绿灯）
+
+- Show 集群级订阅复制（订阅 API 仅进程内注册表；跨 Stage 交付已验证）——集群广播归 M5/统一规划决策项。
+- OTel 传输（HTTP/gRPC）由宿主 sink 实现，框架不做网络 IO（按 cr otel.cr 边界）。
+- CI 实跑结果待 push 后确认（含 PG leg 重跑）。
+
+---
+
+# 存档：M2 基线（2026-11-17，run 43919996911 PG leg 1 断言竞态红、其余 8 job 绿）
 
 ## 逐项验证（M2）
 

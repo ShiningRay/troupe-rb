@@ -95,3 +95,29 @@ class OwnershipTest < Minitest::Test
     b.shutdown!
   end
 end
+
+  # 接管健康指标（M3）：续租失败 → leaseRenewFailures；所有权确已转移 → handovers
+  def test_lease_renew_failure_and_handover_metrics
+    store = Troupe::MemoryPropStore.new(ownership: true)
+    troupe_a = Troupe::Testing.rehearsal(actors: [CounterActor], prop_store: store,
+                                         ownership_lease: "0.9s")
+    troupe_b = Troupe::Testing.rehearsal(actors: [CounterActor], prop_store: store,
+                                         ownership_lease: "0.9s", ownership_acquire_timeout: "5s")
+    a_agent = troupe_a.cast(CounterActor, "metrics-1")
+    assert_equal 1, a_agent.bump(1)
+
+    # 拨过期 A 的租约 → B 接管（epoch 2）；A 的实例仍在跑
+    ns = troupe_a.config.namespace
+    store.ownership_record(ns, "Counter", "metrics-1")[:lease_until] = Troupe::Util.now_ms - 1
+    assert_equal 1, troupe_b.cast(CounterActor, "metrics-1").bump(1), "B 接管成功"
+    assert_equal 2, troupe_b.stage_manager.inspect_cell("Counter", "metrics-1")["fencingToken"]
+
+    # A 的心跳续租失败 → 计数；且所有权确已转移 → handover
+    wait_until(10) { troupe_a.metrics.snapshot["leaseRenewFailures"] >= 1 }
+    assert_operator troupe_a.metrics.snapshot["handovers"], :>=, 1, "所有权确已转移计 handover"
+    role_metrics = troupe_a.metrics.snapshot["Counter"]
+    assert_operator role_metrics["leaseRenewFailures"], :>=, 1, "角色级计数同样可观测"
+
+    troupe_a.shutdown!
+    troupe_b.shutdown!
+  end

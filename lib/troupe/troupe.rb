@@ -11,6 +11,7 @@ require_relative "actor"
 require_relative "agent"
 require_relative "trace"
 require_relative "show"
+require_relative "otel"
 require_relative "stage_manager"
 require_relative "props/prop_store"
 require_relative "props/pstore_store"
@@ -166,10 +167,10 @@ module Troupe
       end
     end
 
-    # ---- Show（进程内 pub/sub，DESIGN §2） ----
+    # ---- Show（实时 Audience，DESIGN §2 / ROADMAP M3） ----
 
     def show(name)
-      @shows_lock.synchronize { @shows[name.to_s] ||= Show.new(name.to_s) }
+      @shows_lock.synchronize { @shows[name.to_s] ||= Show.new(name.to_s, self) }
     end
 
     # ---- 生命周期 ----
@@ -309,6 +310,9 @@ module Troupe
                                              owner: owner_id, expected_epoch: cell.fencing_token,
                                              lease_ms: lease_ms)
             unless ok
+              # 接管健康指标（M3）：续租失败 ⊇ 移交——所有权确已转移才计 handover
+              @metrics.note_lease_renew_failure(cell.role_id)
+              @metrics.note_handover if ownership_taken_by_another?(cell)
               Log.warn("所有权丢失：#{cell.label}（租约被顶替）→ 停止接单并排空，保存将被 fencing 拒绝（DESIGN §6.5）")
               cell.request_drain!(:ownership_lost)
             end
@@ -318,7 +322,20 @@ module Troupe
         Log.error("所有权心跳线程退出：#{e.class}: #{e.message}")
       end
     end
-  end
+
+    # 所有权是否已被其他持有者取得（best-effort：Provider 提供诊断视图时才判）
+    def ownership_taken_by_another?(cell)
+      if @prop_store.respond_to?(:ownership_row)
+        row = @prop_store.ownership_row(cell.namespace, cell.role_id, cell.stage_name)
+        row && row[1] != owner_id
+      elsif @prop_store.respond_to?(:ownership_record)
+        rec = @prop_store.ownership_record(cell.namespace, cell.role_id, cell.stage_name)
+        rec && rec[:owner] != owner_id && rec[:lease_until] > Util.now_ms
+      end
+    rescue StandardError
+      nil
+    end
+    end
 
   # 模块级门面：Troupe.form(...)（Ruby 里模块与集群句柄类同名，
   # 与 Troupe.js 的顶层 Troupe 类保持同一 API 形态）

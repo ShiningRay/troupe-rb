@@ -54,6 +54,7 @@ module Troupe
       @errors = 0
       @rejected = 0
       @activations = 0
+      @lease_renew_failures = 0
       @durations = []
     end
 
@@ -73,12 +74,17 @@ module Troupe
       @mutex.synchronize { @activations += 1 }
     end
 
+    def note_lease_renew_failure
+      @mutex.synchronize { @lease_renew_failures += 1 }
+    end
+
     def snapshot
       @mutex.synchronize do
         sorted = @durations.sort
         pick = ->(p) { sorted[[0, (sorted.size * p).ceil - 1].min] }
         {
           "calls" => @calls, "errors" => @errors, "rejected" => @rejected, "activations" => @activations,
+          "leaseRenewFailures" => @lease_renew_failures,
           "p50ms" => sorted.empty? ? nil : (pick.call(0.50) * 1000).round(3),
           "p99ms" => sorted.empty? ? nil : (pick.call(0.99) * 1000).round(3),
           "maxMs" => sorted.empty? ? nil : (sorted.last * 1000).round(3)
@@ -87,11 +93,13 @@ module Troupe
     end
   end
 
-  # 全局指标（DESIGN §5.3/§11.4）
+  # 全局指标（DESIGN §5.3/§11.4；M3 接管健康指标对齐 troupejs leaseRenewFailures/handovers）
   class Metrics
     def initialize
       @lock = Mutex.new
       @roles = {}
+      @lease_renew_failures = 0
+      @handovers = 0
     end
 
     def for_role(role_id)
@@ -106,10 +114,22 @@ module Troupe
       for_role(role_id).note_activation
     end
 
+    # 接管健康（M3）：续租失败 ⊇ 移交——仅当所有权确已转移给其他持有者才计 handover
+    def note_lease_renew_failure(role_id)
+      for_role(role_id).note_lease_renew_failure
+      @lock.synchronize { @lease_renew_failures += 1 }
+    end
+
+    def note_handover
+      @lock.synchronize { @handovers += 1 }
+    end
+
     def snapshot
-      @lock.synchronize { @roles.keys }.to_h do |role|
+      roles = @lock.synchronize { @roles.keys }.to_h do |role|
         [role, for_role(role).snapshot]
       end
+      cluster = { "leaseRenewFailures" => @lease_renew_failures, "handovers" => @handovers }
+      cluster.merge(roles)
     end
   end
 
@@ -162,7 +182,9 @@ module Troupe
         end
         @subs.each do |s|
           begin
-            s.push_nonblock(event)
+            # push_nonblock 在 Ruby stdlib 不存在（曾静默吞掉全部订阅投递）：
+            # SizedQueue#push(obj, non_block=true) 满则抛 ThreadError——慢订阅者丢弃
+            s.push(event, true)
           rescue ThreadError
             # 慢订阅者：丢弃（不阻塞调用路径）
           end

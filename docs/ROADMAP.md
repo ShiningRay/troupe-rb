@@ -49,12 +49,12 @@
 
 ## M3 Show→Audience 与可观测
 
-- [ ] Show 升级为 Actor Audience：订阅/投递经完整 Turn 管道（学 cr M4），外部订阅者走边界回调；在线尽力而为、无重投承诺、明确不叫流。
-- [ ] 跨 Stage Show 转发 + 慢订阅者隔离（一个慢消费者不拖垮发布者/其他订阅者）。
-- [ ] OTel：零依赖 OTLP JSON 导出适配（学 cr `otel.cr` ring buffer + sink 回调）+ W3C traceparent 贯穿（已有 trace 基础）。
-- [ ] Director/metrics 增强：leaseRenewFailures/handovers 等接管健康指标（学 js）。
+- [x] Show 升级为 Actor Audience：订阅/投递经完整 Turn 管道（学 cr M4），外部订阅者走边界回调；在线尽力而为、无重投承诺、明确不叫流（PublishReport 可断言交付计数）。
+- [x] 跨 Stage Show 转发（订阅在本地、Actor 环归属其他 Stage → route 转发）+ 慢订阅者隔离（deadline 有界等待，慢消费者计 failed 不拖垮发布者/其他订阅者）。
+- [x] OTel：零依赖 OTLP JSON 导出适配（学 cr `otel.cr`：sink 回调，传输宿主实现；TraceEvent→span / 指标→monotonic Sum）+ W3C traceparent 贯穿（call 帧跨 Stage 传播进 span）。
+- [x] Director/metrics 增强：leaseRenewFailures/handovers 等接管健康指标（学 js；续租失败 ⊇ 移交）。
 
-**门禁**：跨 Stage Audience、慢订阅者隔离、离线尽力语义各有反例测试。
+**门禁**：跨 Stage Audience、慢订阅者隔离、离线尽力语义各有反例测试。（本地 179 runs 全绿 ×2；顺带修复 TraceBus.subscribe 静默不投递的历史 bug——push_nonblock 在 Ruby stdlib 不存在）
 
 ## M4 持久流与 Outbox（M2 之后；学 js ADR 0005 / cr M5–M6）
 

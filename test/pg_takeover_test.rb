@@ -107,8 +107,10 @@ class PgTakeoverTest < Minitest::Test
                     expected_revision: stored.revision, schema_version: 1, fencing_token: 1)
     end
     assert_match(/fencing/, e.message)
-    assert_equal stored.revision, @direct.read(@ns, "mproc", "w1").revision, "旧 epoch 写被拒：revision 未变"
+    # B 仍在持续写（提醒重投）——断言旧 epoch 写未被采纳即可，revision 比较只做下界
     refute_equal 999_999, @direct.read(@ns, "mproc", "w1").props["n"], "旧 epoch 未被写入"
+    assert_operator @direct.read(@ns, "mproc", "w1").revision, :>=, stored.revision,
+                   "B 的写入已生效，旧 epoch 写被拒"
   end
 
   def test_real_topology_reported
