@@ -356,12 +356,17 @@ module Troupe
       end
     end
 
+    # cluster token 校验（M2 传输认证）：常时比较；轮换宽限期内接受上一代 token
+    # （rotate：current→previous，宽限后 revoke——置空 previous 即完成撤销）
     def check_cluster_token!(frame)
       expected = @troupe.config.cluster_token
       return if expected.nil? || expected.empty?
 
       provided = frame["token"].to_s
-      raise ProtocolError, "cluster token 校验失败：节点加入需受控网络或 join 凭证（DESIGN §6.1）" unless provided.bytesize == expected.bytesize && provided == expected
+      accepted = [expected, @troupe.config.cluster_token_previous].compact.reject(&:empty?)
+      unless accepted.any? { |t| Util.secure_compare(provided, t) }
+        raise ProtocolError, "cluster token 校验失败：节点加入需受控网络或 join 凭证（DESIGN §6.1）"
+      end
     end
 
     def handle_call(conn, frame)
@@ -374,7 +379,7 @@ module Troupe
       to = c["to"].is_a?(Hash) ? c["to"] : {}
       if to["role"] == Director::ROLE_ID
         admin = @troupe.config.admin_token
-        authorized = conn.loopback || (!admin.nil? && !admin.empty? && frame["token"].to_s == admin)
+        authorized = conn.loopback || (!admin.nil? && !admin.empty? && Util.secure_compare(frame["token"].to_s, admin))
         unless authorized
           conn.reply(error_resp(frame, CallRejectedError.new("Director 仅响应 loopback；远程访问需 TROUPE_ADMIN_TOKEN（DESIGN §11.1）")))
           return
@@ -418,7 +423,7 @@ module Troupe
 
     def handle_subscribe(conn, frame)
       admin = @troupe.config.admin_token
-      authorized = conn.loopback || (!admin.nil? && !admin.empty? && frame["token"].to_s == admin)
+      authorized = conn.loopback || (!admin.nil? && !admin.empty? && Util.secure_compare(frame["token"].to_s, admin))
       unless authorized
         conn.reply("t" => "sub", "ok" => false, "message" => "tail 需要 loopback 或 admin token")
         return

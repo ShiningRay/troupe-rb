@@ -29,11 +29,26 @@ module Troupe
     end
   end
 
+  # StoreCapabilities（M2，对齐 troupejs Provider 能力矩阵）：
+  # 生产门禁依据，不是文档声明——production + transport 模式拒绝非 cross_node_safe Provider。
+  StoreCapabilities = Struct.new(:cross_node_safe, :supports_fencing, :supports_transactions) do
+    def to_h
+      { "crossNodeSafe" => cross_node_safe, "supportsFencing" => supports_fencing,
+        "supportsTransactions" => supports_transactions }
+    end
+  end
+
   # PropStore（道具间）接口合同（DESIGN §7.2）：
   # * create/write 必须原子（如单条 UPDATE … WHERE revision = ?）；
   # * 冲突抛 ConflictError；
   # * 写结果不确定（网络超时）时，调用方以 read 校验实际 revision 后决定，不盲目重写。
   class PropStore
+    # Provider 能力矩阵（M2，对齐 troupejs）：生产门禁依据——
+    # production + transport 模式拒绝非 cross_node_safe Provider（除非显式降级开关）
+    def capabilities
+      StoreCapabilities.new(false, false, false)
+    end
+
     def read(_namespace, _role_id, _stage_name)
       raise NotImplementedError
     end
@@ -84,6 +99,12 @@ module Troupe
       @props = {}
       @ownership = {}
       @supports_ownership = ownership
+      # 进程内共享（同进程多 Stage 集群测试可用），但不跨节点：cross_node_safe=false
+      @capabilities = StoreCapabilities.new(false, true, false)
+    end
+
+    def capabilities
+      @capabilities
     end
 
     def ownership_enabled?

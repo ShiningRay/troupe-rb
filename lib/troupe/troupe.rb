@@ -217,17 +217,29 @@ module Troupe
     end
 
     def build_prop_store
-      case spec = @config.prop_store_spec
+      store = resolve_prop_store(@config.prop_store_spec)
+      # 生产门禁（M2 能力矩阵）：production + transport 拒绝非 cross_node_safe Provider
+      # （PStore/SQLite/Memory），除非显式 allow_unsafe_store 降级
+      if @config.mode == "production" && @config.transport_enabled &&
+         !store.capabilities.cross_node_safe && !@config.allow_unsafe_store
+        raise ConfigError,
+              "production 模式拒绝非 cross_node_safe 存储（#{store.class.name}）：多节点数据一致性需要 " \
+              "PostgreSQL Provider；单机演示请用 dev 模式或显式 allow_unsafe_store: true（DESIGN §7.2）"
+      end
+      store
+    end
+
+    def resolve_prop_store(spec)
+      case spec
       when PropStore then spec
       when :memory, "memory" then MemoryPropStore.new
       when :pstore, "pstore", nil then PStorePropStore.new(File.join(@config.props_dir, "props.pstore"))
+      when :postgres, "postgres", :pg, "pg" then open_postgres(nil)
       when :sqlite, "sqlite" then require_sqlite; SqlitePropStore.new(File.join(@config.props_dir, "props.db"))
       when String
         uri = spec
         if uri.start_with?("postgres://", "postgresql://")
-          raise ConfigError,
-                "Ruby 版尚未内置 PostgresPropStore（多节点共享存储，路线图 item M3-eq）；" \
-                "当前可单机运行（pstore/sqlite），集群强一致场景请暂用 Troupe.js"
+          open_postgres(uri)
         elsif uri.start_with?("sqlite://", "sqlite3://")
           require_sqlite
           SqlitePropStore.new(uri.sub(%r{\Asqlite3?://}, ""))
@@ -241,6 +253,18 @@ module Troupe
       end
     end
 
+    def open_postgres(uri)
+      require_relative "props/pg_store"
+      # owner 身份 = incarnation（重启即新身份 → 接管 epoch 单调 +1，DESIGN §6.5）
+      PostgresPropStore.open(uri || env_pg_url,
+                             lease_ms: (Util.parse_duration(@config.ownership_lease, "租约") * 1000).to_i)
+    end
+
+    def env_pg_url
+      ENV["TROUPE_PG_URL"] ||
+        raise(ConfigError, "Postgres PropStore 需要 URL：prop_store: \"postgres://…\" 或 TROUPE_PG_URL")
+    end
+
     def require_sqlite
       require_relative "props/sqlite_store"
     end
@@ -251,6 +275,14 @@ module Troupe
       when :memory, "memory" then MemoryCueStore.new
       when :pstore, "pstore", nil then PstoreCueStore.new(File.join(@config.props_dir, "cues.pstore"))
       when false then nil
+      when String, Symbol
+        spec = @config.cue_store_spec.to_s
+        if spec.start_with?("postgres://", "postgresql://")
+          require_relative "cues/pg_cue_store"
+          PostgresCueStore.open(spec)
+        else
+          raise ConfigError, "未知 CueStore spec：#{@config.cue_store_spec.inspect}"
+        end
       else raise ConfigError, "未知 CueStore spec：#{@config.cue_store_spec.inspect}"
       end
     end

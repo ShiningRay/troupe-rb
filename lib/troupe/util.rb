@@ -60,6 +60,17 @@ module Troupe
       "#{now_ms}-#{SecureRandom.hex(4)}"
     end
 
+    # 常时比较（M2 传输认证）：token 校验不泄漏匹配前缀长度（时序侧信道）
+    def secure_compare(a, b)
+      a = a.to_s.b
+      b = b.to_s.b
+      return false unless a.bytesize == b.bytesize
+
+      diff = 0
+      a.bytes.each_with_index { |x, i| diff |= x ^ b.getbyte(i) }
+      diff.zero?
+    end
+
     # 复合键（提醒 id 等）
     def new_id(*parts)
       parts.join("|")

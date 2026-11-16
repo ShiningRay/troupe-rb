@@ -15,6 +15,7 @@ module Troupe
       rescue LoadError
         raise ConfigError, "SqlitePropStore 需要 sqlite3 gem：gem install sqlite3（或使用默认 PStorePropStore）"
       end
+      dir = File.dirname(path)
       FileUtils.mkdir_p(dir) unless dir.empty?
       @mutex = Mutex.new
       @db = ::SQLite3::Database.new(path)
@@ -71,13 +72,14 @@ module Troupe
       k = PropStore.key(ns, role_id, stage_name)
       json = JSON.generate(Codec.normalize(props, "$", {}))
       @mutex.synchronize do
-        changes = @db.execute(
+        before = @db.total_changes
+        @db.execute(
           "UPDATE troupe_props SET props = ?, revision = revision + 1, schema_version = ?, " \
           "fence = CASE WHEN ? > fence THEN ? ELSE fence END " \
           "WHERE k = ? AND revision = ? AND ? >= fence",
           [json, schema_version, fencing_token, fencing_token, k, expected_revision, fencing_token]
         )
-        if changes.empty? || @db.changes.zero?
+        if @db.total_changes == before # CAS 未命中：精确诊断（fencing 优先）
           row = @db.execute("SELECT revision, fence FROM troupe_props WHERE k = ?", [k]).first
           raise ConflictError, "Props 记录不存在：#{role_id}/#{stage_name}" unless row
           if row[1] > fencing_token
@@ -127,9 +129,10 @@ module Troupe
       k = PropStore.key(ns, role_id, name)
       now = Util.now_ms
       @mutex.synchronize do
+        before = @db.total_changes
         @db.execute("UPDATE troupe_ownership SET lease_until = ? WHERE k = ? AND owner = ? AND epoch = ?",
                     [now + lease_ms, k, owner, expected_epoch])
-        @db.changes.positive?
+        @db.total_changes > before
       end
     end
 

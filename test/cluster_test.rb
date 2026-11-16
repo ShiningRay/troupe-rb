@@ -197,6 +197,46 @@ class ClusterTest < Minitest::Test
     end
   end
 
+  # 传输认证（M2）：rotate/grace/revoke——常时比较，宽限期内上一代 token 被接受，
+  # 撤销（previous 置空）后立即拒绝
+  def test_cluster_token_rotation_grace_and_revoke
+    t1 = form_troupe(cluster_token: "v2-token", cluster_token_previous: "v1-token")
+    host, port = t1.advertise.split(":")
+    tr = Troupe::Transport.new(nil)
+
+    hello_with = lambda do |tok|
+      sock = TCPSocket.new(host, Integer(port, 10))
+      frame = JSON.generate({ "t" => "hello", "v" => Troupe::PROTOCOL_VERSION, "token" => tok })
+      sock.write([frame.bytesize].pack("V") + frame)
+      begin
+        resp = tr.send(:read_frame, sock)
+      rescue EOFError, IOError, Troupe::ProtocolError
+        resp = nil
+      end
+      [sock, resp]
+    end
+
+    sock1, resp1 = hello_with.call("v1-token")
+    assert resp1 && resp1["ok"], "宽限期内上一代 token 被接受（grace）"
+    sock1.close
+    sock2, resp2 = hello_with.call("v2-token")
+    assert resp2 && resp2["ok"], "当前 token 正常"
+    sock2.close
+
+    sock3, resp3 = hello_with.call("wrong")
+    assert resp3.nil?, "错误 token 连接被拒"
+    sock3.close rescue nil
+
+    t1.config.cluster_token_previous = nil # revoke：撤销上一代
+    sock4, resp4 = hello_with.call("v1-token")
+    assert resp4.nil?, "撤销后旧 token 立即失效"
+    sock4.close rescue nil
+
+    # Stage 存活，正常调用不受影响
+    a = t1.cast(WorkerActor, "token-ok")
+    assert_equal 1, a.add(1)
+  end
+
   def test_forward_hop_limit
     t1 = form_troupe
     t2 = form_troupe(seeds: [t1.advertise])

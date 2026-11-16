@@ -276,6 +276,24 @@ class RuntimeTest < Minitest::Test
     assert_equal 0, budget.used, "pop 释放字节预算"
   end
 
+  # 生产门禁（M2 能力矩阵）：production + transport 拒绝非 cross_node_safe 存储
+  def test_production_requires_cross_node_safe_store
+    e = assert_raises(Troupe::ConfigError) do
+      Troupe.form(actors: [CounterActor], mode: "production", advertise: "127.0.0.1:17300",
+                  port: 0, prop_store: :pstore)
+    end
+    assert_match(/cross_node_safe/, e.message)
+
+    # 显式降级开关：单机演示可越过门禁（自担风险）
+    t = Troupe.form(actors: [CounterActor], mode: "production", advertise: "127.0.0.1:17301",
+                    port: 0, prop_store: :memory, allow_unsafe_store: true)
+    begin
+      assert_equal 1, t.cast(CounterActor, "prod-1").bump(1)
+    ensure
+      t.shutdown!
+    end
+  end
+
   def test_local_call_copy_boundary
     troupe = mk_troupe(actors: [CounterActor])
     cart = troupe.cast(CounterActor, "c1")

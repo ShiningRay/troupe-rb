@@ -38,14 +38,14 @@
 
 ## M2 生产共享状态与真实故障接管（#5 核心）
 
-- [ ] PostgreSQL PropStore：行级 CAS、revision、fence 全路径（create/write/delete 均校验 fencing token）、DB 时钟租约、单调 epoch——所有检查收敛进单条 `UPDATE ... WHERE`。
-- [ ] PostgreSQL OwnershipStore：acquire/renew/takeover/release；续租失败 stop-serving 并失效本地激活（js 的 renewFailures 语义）。
-- [ ] PostgreSQL CueStore：`FOR UPDATE SKIP LOCKED` claim + DB 时钟；调度先按环/目录归属过滤，重复投递由幂等消费兜底。
-- [ ] 能力矩阵 + 生产门禁：`cross_node_safe` 标注；生产拒绝 PStore/SQLite（除非显式降级开关）；Provider 契约测试套件。
-- [ ] 真实多进程验收（学 cr 的 pg_worker 子进程矩阵）：≥2 个独立 Ruby 进程连真实 PG，kill -9 持锁者 → 租约到期接管 → 旧 epoch 写被拒 → Props/reminder 从共享存储恢复；测试输出真实拓扑与数据库版本。
-- [ ] 传输认证：token 常时比较 + rotate/grace/revoke（学 cr security.md）；TLS 先指导文档（学 js 的 secureConnect 门控可后补）。
+- [x] PostgreSQL PropStore：行级 CAS、revision、fence 全路径（fencing 权威在所有权表、epoch 单调）、DB 时钟租约（now()）——所有检查收敛进单条 `UPDATE ... WHERE`（fencing 优先于 CAS 的精确诊断）。
+- [x] PostgreSQL 所有权：acquire/renew/takeover/release；接管 stop-serving 由续租失败路径承担（心跳 request_drain!(:ownership_lost)），fencing 兜底拒绝旧 epoch 写。
+- [x] PostgreSQL CueStore：`FOR UPDATE SKIP LOCKED` claim + statusVersion CAS + DB 时钟租约；调度按环/namespace 过滤保留，重复投递由幂等消费兜底。
+- [x] 能力矩阵 + 生产门禁：`StoreCapabilities{cross_node_safe, supports_fencing, supports_transactions}`；production + transport 拒绝 PStore/SQLite/Memory（显式 `allow_unsafe_store` 降级开关）；Provider 契约测试套件（Memory/PStore/SQLite/PG 四实现 + 所有权契约）。
+- [x] 真实多进程验收（学 cr 的 pg_worker 子进程矩阵）：≥2 个独立 Ruby 进程连真实 PG，kill -9 持锁者 → 租约到期接管（epoch 2）→ 旧 epoch 写被拒 → Props/reminder 从共享存储恢复；测试输出真实拓扑与数据库版本（`test/pg_takeover_test.rb`）。
+- [x] 传输认证：token 常时比较（Util.secure_compare）+ rotate/grace/revoke（`cluster_token_previous` 宽限）；TLS 先指导文档（README 已知边界，学 js 的 secureConnect 门控可后补）。
 
-**门禁**：跨进程旧 epoch 无法写、无未保护双活写；Props 与 reminders 可从共享存储恢复；PStore 降级为开发用途。
+**门禁**：跨进程旧 epoch 无法写、无未保护双活写；Props 与 reminders 可从共享存储恢复；PStore 降级为开发用途。（本地 168 runs 全绿 ×2 含 PG；CI PG leg 以 Actions 实跑为准）
 
 ## M3 Show→Audience 与可观测
 

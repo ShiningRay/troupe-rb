@@ -10,8 +10,8 @@ module Troupe
                   :host, :port, :advertise, :seeds, :require_cluster, :join_timeout,
                   :call_timeout, :intermission, :cue_tick, :reminder_lease, :shutdown_grace,
                   :call_board_limit, :activation_limit, :queue_bytes_limit, :remote_workers,
-                  :local_call_by_reference, :admin_token, :cluster_token,
-                  :prop_store_spec, :cue_store_spec, :props_dir,
+                  :local_call_by_reference, :admin_token, :cluster_token, :cluster_token_previous,
+                  :prop_store_spec, :cue_store_spec, :props_dir, :allow_unsafe_store,
                   :ownership, :ownership_lease, :ownership_acquire_timeout,
                   :trace_sample, :trace_capacity, :improv_idle, :call_timeout_s,
                   :dispatcher, :dispatcher_threads
@@ -45,6 +45,10 @@ module Troupe
       cfg.local_call_by_reference = !!opts[:local_call_by_reference]
       cfg.admin_token = opts[:admin_token] || env["TROUPE_ADMIN_TOKEN"]
       cfg.cluster_token = opts[:cluster_token] || env["TROUPE_CLUSTER_TOKEN"]
+      # 轮换宽限（M2 传输认证）：上一代 token 在宽限期内仍被接受（rotate/grace/revoke）
+      cfg.cluster_token_previous = opts[:cluster_token_previous] || env["TROUPE_CLUSTER_TOKEN_PREVIOUS"]
+      # 生产门禁降级开关：显式接受非 cross_node_safe 存储（单机演示用，默认拒绝）
+      cfg.allow_unsafe_store = !!opts[:allow_unsafe_store]
       cfg.props_dir = opts[:props_dir] || env["TROUPE_PROPS_DIR"] || "./.troupe"
       cfg.prop_store_spec = opts[:prop_store] || env["TROUPE_PROPSTORE"] || (cfg.rehearsal ? :memory : :pstore)
       cfg.cue_store_spec = opts[:cue_store] || (cfg.rehearsal ? :memory : :pstore)

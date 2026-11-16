@@ -1,7 +1,52 @@
-# 验证基线（2026-11-17，M1 迭代）
+# 验证基线（2026-11-17，M2 迭代）
 
-环境：Windows、Ruby 4.0.6、Bundler 4.0.24，trouperb 工作树（M1 提交）。
-Issue 对应：#7 + M1 语义对齐（错误映射 / golden / 版本协商 / 背压 / 调度矩阵）。M0 基线见下节存档。
+环境：Windows、Ruby 4.0.6、Bundler 4.0.24；真实 PostgreSQL 15.19（docker `troupe-pg` @127.0.0.1:55444，专用库 `troupe_rb_test`）。
+Issue 对应：#5（生产共享状态与真实故障接管）。M1/M0 基线见下节存档。
+
+## 默认入口
+
+```sh
+bundle install
+bundle exec rake test                                # 矩阵 leg：PG 项 skip（由专用 PG leg 必跑）
+TROUPE_TEST_PG=postgres://…/troupe_rb_test bundle exec rake test   # PG leg：契约 + 多进程接管
+```
+
+**结果（PG leg 全量）：168 runs，3024 assertions，0 failures，0 errors，0 skips**（M1 基线 116 → M2 168）。
+矩阵 leg（无 PG env）：168 runs，0 failures，0 errors，20 skips（PG 项让位给专用 leg）。
+
+## 逐项验证（M2）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| PostgreSQL PropStore | 行级 CAS + fencing 单条 UPDATE（所有权表为权威，epoch 单调唯一持有）；fencing 优先于 CAS 的精确诊断；`provider_contract_test.rb` PG 契约九项 | ✅ |
+| 所有权 acquire/renew/takeover/release | 契约测试：重入不涨 epoch、他人持有效租约取不到、过期接管 +1、release 保留墓碑不回退、接管前移 fence、旧 epoch 写被拒 | ✅ |
+| PostgreSQL CueStore | `FOR UPDATE SKIP LOCKED` + statusVersion CAS + DB 时钟租约；契约五项 + db_clock 重投 | ✅ |
+| 能力矩阵 + 生产门禁 | `StoreCapabilities`；production+transport 拒绝 PStore/Memory（反例测试）；`allow_unsafe_store` 显式降级（测试覆盖） | ✅ |
+| Provider 契约测试套件 | 同一套断言跑 Memory/PStore/SQLite/PG 四实现 + 所有权契约（重入/接管/墓碑/fence 前移） | ✅ 48 runs |
+| 真实多进程 kill -9 接管 | `pg_takeover_test.rb`：2 个独立进程连真实 PG；READY(n=1 提交) → kill -9 持锁者 → 租约 2s 到期 → 接管者 epoch 2 → Props 恢复（n≥2）+ 提醒重投 → 旧 epoch fencing 写被拒、revision 不变 | ✅ 本地 docker PG 全链路 |
+| 传输认证 | `Util.secure_compare` 常时比较（cluster/admin token）；rotate/grace/revoke 测试（旧 token 宽限接受 → revoke 后立即拒绝） | ✅ |
+
+## 发现并顺带修复（M2）
+
+- **`SqlitePropStore` 未定义局部变量 `dir`**（`FileUtils.mkdir_p(dir)`）：Provider 契约套件抓出的潜伏 bug——任何 sqlite PropStore 首次实例化即 NameError。
+- **SQLite `@db.changes` 不可靠**（UPDATE 命中后返回 0 → 误报 CAS 冲突且读到已更新行）：改用 `total_changes` 增量。
+- **PG TEXT 不能含 null byte**：PropStore.key 的 `\u0000` 连接符在 PG 用 JSON 数组 key 替代。
+- **pg gem 无 type map 时全部返回字符串**：显式 Integer 转换（read/acquire/claim/ownership_row/diagnose——字符串比较曾让 diagnose 误判 fencing）。
+- **`localhost` 在 Windows/docker 环境走 IPv6 21s 超时**：测试 URL 用 `127.0.0.1`。
+- **共享 troupe-pg 库与 troupe.cr 表结构冲突**（列名不同）：专用测试库 `troupe_rb_test` 隔离。
+- takeover 测试的 `ownership_row` 断言需 Integer 转换；PG 租约/epoch 的诊断比较一律显式转型。
+
+## 未验证边界（不伪装绿灯）
+
+- CI PG leg 实跑结果待 GitHub Actions（service container postgres:15 + TROUPE_TEST_PG）。
+- 多进程验收未覆盖：kill 整机（网络分区）、PG 主从切换——超出本迭代范围。
+- 幂等重放（信封 idem 的运行时消费）接线在 M4（Outbox/Inbox）。
+- TLS 未实现（指导文档见 README 已知边界）。
+- 环回特性依赖：Windows 本地无法验证 Linux 专有信号（kill -9 用 TerminateProcess 等价）。
+
+---
+
+# 存档：M1 基线（2026-11-17）
 
 ## 默认入口
 

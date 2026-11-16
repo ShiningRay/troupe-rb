@@ -1,5 +1,5 @@
-# Troupe.rb CI（ROADMAP M0）：Ruby 支持矩阵 3.2/3.3/3.4/4.0 × ubuntu/windows。
-# 约定：任何 job 显式 skip 即视为失败（后续 PG 必跑 leg 沿用此纪律，M2 引入）。
+# Troupe.rb CI（ROADMAP M0/M2）：Ruby 支持矩阵 3.2/3.3/3.4/4.0 × ubuntu/windows
+# + PostgreSQL 必跑 leg（M2：PG 契约/多进程接管——「skip 即失败」纪律落在 leg 门禁）。
 name: CI
 
 on:
@@ -26,3 +26,37 @@ jobs:
         run: bundle exec rake test
         env:
           TROUPE_LOG: fatal
+
+  pg:
+    name: postgres / ruby-4.0（M2 必跑 leg）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: troupe
+          POSTGRES_PASSWORD: troupe
+          POSTGRES_DB: troupe_rb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U troupe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TROUPE_LOG: fatal
+      TROUPE_TEST_PG: postgres://troupe:troupe@127.0.0.1:5432/troupe_rb_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      # skip 即失败纪律：PG leg 必须真正执行 PG 测试，环境缺失即红
+      - name: PG leg gate (skip is failure)
+        run: |
+          test -n "$TROUPE_TEST_PG" || { echo 'skip 即失败：TROUPE_TEST_PG 未设置'; exit 1; }
+          pg_isready -h 127.0.0.1 -U troupe || exit 1
+      - name: Run test suite (with real PostgreSQL)
+        run: bundle exec rake test
