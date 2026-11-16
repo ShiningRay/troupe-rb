@@ -1,6 +1,8 @@
 # Troupe.rb
 
-> Troupe.js（[DESIGN](../troupejs/DESIGN.md) / [PLAN](../troupejs/PLAN.md)）的 Ruby 版本：面向 Ruby 的 **Virtual Actor** 框架，思想对标 Microsoft Orleans 与 EA Orbit，命名与语义全面沿用"剧团（Troupe）"隐喻。**运行时零 gem 依赖**（纯 stdlib）。
+[![CI](https://github.com/ShiningRay/troupe/actions/workflows/ci.yml/badge.svg)](https://github.com/ShiningRay/troupe/actions/workflows/ci.yml)
+
+> Troupe.js（[DESIGN](../troupejs/DESIGN.md) / [PLAN](../troupejs/PLAN.md)）的 Ruby 版本：面向 Ruby 的 **Virtual Actor** 框架，思想对标 Microsoft Orleans 与 EA Orbit，命名与语义全面沿用"剧团（Troupe）"隐喻。**运行时零第三方 gem 依赖**（logger 为 Ruby 4 bundled gem，已显式声明）。
 
 ## 核心语义
 
@@ -82,11 +84,11 @@ ruby bin/troupe --to 127.0.0.1:7301 ps     # 在场演员（跨 Stage 聚合）
 | 持久提醒 | 下场后仍触发并重新登台；租约到期重投（至少一次） | `test/cue_test.rb` |
 | 信任边界 | 生命周期钩子/基类成员不可经 RPC；畸形帧可控拒绝 | `test_whitelist_enforced_on_wire`、`test_malformed_frame…` |
 
-运行全部测试：
+运行全部测试（Ruby ≥ 3.2；CI 矩阵 3.2/3.3/3.4/4.0 × ubuntu/windows）：
 
 ```bash
 bundle install
-bundle exec rake test   # 78 runs
+bundle exec rake test
 ```
 
 ## Orleans 对标与验证
@@ -104,7 +106,7 @@ bundle exec rake test   # 78 runs
 | Stage 监听 | `127.0.0.1:7300` | `TROUPE_PORT` / `TROUPE_HOST` / `TROUPE_ADVERTISE` |
 | seeds | 空 = 自成一团 | `TROUPE_SEEDS`（逗号分隔） |
 | PropStore | PStore `./.troupe/props.pstore`（进程级持久）；`:memory` / `:sqlite`（需 sqlite3 gem） | `TROUPE_PROPS_DIR` / `TROUPE_PROPSTORE` |
-| 命名空间 | 当前目录名 | `TROUPE_NAMESPACE` |
+| 命名空间 | `default`（固定值；多套共存请显式配置，不随目录名漂移） | `TROUPE_NAMESPACE` |
 | Call 超时 / Intermission / Cue tick | 30s / 5m / 1s | — |
 | 调度模型 | `:thread_per_cell`（每 Cell 一条调度线程，阻塞隔离最好）；`:shared`（M=核数(≤8) 条共享调度线程多路复用 Cell，激活/内存成本大降：实测激活 ~×10、KB/Actor ~×17，代价：阻塞 Turn 占一条 worker、不支持 kill!、Intermission 秒级精度） | `TROUPE_DISPATCHER` / `TROUPE_DISPATCHER_THREADS` |
 | 优雅停机 | SIGTERM 由应用捕获后调 `troupe.shutdown!`；宽限 10s | `TROUPE_SHUTDOWN_GRACE` |

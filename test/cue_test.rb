@@ -118,4 +118,66 @@ class CueTest < Minitest::Test
     grown = troupe.cast(ReminderActor, "r5").fire_count - first
     assert_operator grown, :<=, 7, "错过多个周期默认跳过，不补发风暴（1s 内 ≤7 次）"
   end
+
+  class BulkActor < Troupe::Actor
+    role_id "bulk"
+    initial_props { { "n" => 0 } }
+
+    def on_cue(_name, _payload)
+      props["n"] += 1
+      save_props
+    end
+
+    def n
+      props["n"]
+    end
+  end
+
+  # 有界投递池（Issue #6）：单 tick 大量到期 → 全部投递，线程数恒为 WORKERS 不膨胀
+  def test_single_tick_many_due_reminders_delivered_with_bounded_thread_pool
+    troupe = form_troupe(actors: [BulkActor])
+    sched = troupe.cue_scheduler
+    ns = troupe.config.namespace
+    count = Troupe::CueScheduler::BATCH + 16 # 超过一个 batch，验证池化而非线性建线程
+    now = Troupe::Util.now_ms
+    count.times do |i|
+      troupe.cue_store.upsert(Troupe::ReminderRecord.new(
+                                id: "bulk-#{i}", namespace: ns, role_id: "bulk", stage_name: "b",
+                                name: "bulk", payload: nil, schedule: "every:3600s", next_due: now - 1000
+                              ))
+    end
+
+    threads_before = Thread.list.size
+    sched.tick # 单 tick 批量认领入队；worker 池并发投递
+    wait_until(15) { troupe.cast(BulkActor, "b").n == count }
+    assert_equal count, troupe.cast(BulkActor, "b").n, "单 tick 大量到期全部投递"
+
+    # 池大小恒定：无论单 tick 多少到期，投递线程都是固定 WORKERS 条（不按量膨胀）
+    assert_equal Troupe::CueScheduler::WORKERS, troupe.cue_scheduler.workers.count(&:alive?),
+                 "投递线程恒为 WORKERS=#{Troupe::CueScheduler::WORKERS}"
+    assert_operator Thread.list.size - threads_before, :<=, 1,
+                    "投递复用同一池，不为到期数量新建线程（仅首个 Cell 激活可 +1 调度线程）"
+  end
+
+  # 停机 drain：队列存量投递处理完（至少一次语义），worker/tick 线程全部退出
+  def test_shutdown_joins_all_cue_worker_threads
+    troupe = form_troupe(actors: [BulkActor], cue_tick: "0.05s")
+    now = Troupe::Util.now_ms
+    20.times do |i|
+      troupe.cue_store.upsert(Troupe::ReminderRecord.new(
+                                id: "drain-#{i}", namespace: troupe.config.namespace, role_id: "bulk",
+                                stage_name: "b", name: "drain", payload: nil,
+                                schedule: "every:3600s", next_due: now - 1000
+                              ))
+    end
+    troupe.cue_scheduler.tick # 队列里留有未完成投递
+    troupe.shutdown! # stop() 先 drain 队列再放 worker 退出
+
+    # 本 Troupe 的 worker 全部退出（不看全局 Thread.list：其他 Troupe 的线程不归属本测试）
+    assert troupe.cue_scheduler.workers.none?(&:alive?), "停机后投递 worker 全部退出"
+    # 存量投递被 drain 处理完：全部记录完成裁决（next_due 前移到下一周期）
+    troupe.cue_store.records.each do |r|
+      assert_operator r.next_due, :>, now, "提醒 #{r.id} 已完成投递裁决"
+    end
+  end
 end

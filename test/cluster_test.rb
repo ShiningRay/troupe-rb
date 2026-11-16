@@ -51,7 +51,7 @@ class ClusterTest < Minitest::Test
     wait_until { t2.roster.alive_peers.include?(t1.advertise) }
 
     # 选一个环上归属 t2 的 key，从 t1 发起调用：位置透明
-    key = (0..50).find { |i| t1.playbill.owner_address("troupe", "Worker", "k#{i}") == t2.advertise }
+    key = (0..50).find { |i| t1.playbill.owner_address(t1.config.namespace, "Worker", "k#{i}") == t2.advertise }
     refute_nil key, "哈希环应把某些 key 分给 t2"
     agent = t1.cast(WorkerActor, "k#{key}")
     assert_equal 1, agent.add(1)
@@ -65,7 +65,7 @@ class ClusterTest < Minitest::Test
     t2 = form_troupe(seeds: [t1.advertise])
     wait_until { t1.roster.alive_peers.include?(t2.advertise) }
 
-    key = (0..50).find { |i| t1.playbill.owner_address("troupe", "Worker", "w#{i}") == t2.advertise }
+    key = (0..50).find { |i| t1.playbill.owner_address(t1.config.namespace, "Worker", "w#{i}") == t2.advertise }
     agent = t1.cast(WorkerActor, "w#{key}")
     symbol_hash = { :name => :x } # Symbol 经线路 → String（JSON 边界语义，与本地一致）
     agent.stash(symbol_hash)
@@ -76,7 +76,7 @@ class ClusterTest < Minitest::Test
     t1 = form_troupe
     t2 = form_troupe(seeds: [t1.advertise])
     wait_until { t1.roster.alive_peers.include?(t2.advertise) }
-    key = (0..50).find { |i| t1.playbill.owner_address("troupe", "Worker", "d#{i}") == t2.advertise }
+    key = (0..50).find { |i| t1.playbill.owner_address(t1.config.namespace, "Worker", "d#{i}") == t2.advertise }
     agent = t1.cast(WorkerActor, "d#{key}")
 
     e = assert_raises(Troupe::CallTimeoutError) do
@@ -92,7 +92,7 @@ class ClusterTest < Minitest::Test
     wait_until { t2.roster.alive_peers.include?(t1.advertise) } # 视图收敛，环归属一致
 
     # 直接构造线路帧调用生命周期钩子：接收端白名单拒绝（信任边界，DESIGN §6.1）
-    call = Troupe::Call.new(namespace: "troupe", role_id: "Worker", stage_name: "evil",
+    call = Troupe::Call.new(namespace: t2.config.namespace, role_id: "Worker", stage_name: "evil",
                             method: :on_stage, args: [],
                             deadline_ms: Troupe::Util.now_ms + 3000, source: :remote)
     e = assert_raises(Troupe::UnknownMethodError) { t2.dispatch_inbound(call) }
@@ -125,7 +125,7 @@ class ClusterTest < Minitest::Test
     t2 = form_troupe(prop_store: store, seeds: [t1.advertise], ownership_lease: "1s")
     wait_until { t1.roster.alive_peers.include?(t2.advertise) }
 
-    key = (0..50).find { |i| t1.playbill.owner_address("troupe", "Worker", "f#{i}") == t2.advertise }
+    key = (0..50).find { |i| t1.playbill.owner_address(t1.config.namespace, "Worker", "f#{i}") == t2.advertise }
     agent = t1.cast(WorkerActor, "f#{key}")
     assert_equal 3, 3.times.map { agent.add(1) }.last # 在 t2 上激活并提交
 
@@ -134,7 +134,7 @@ class ClusterTest < Minitest::Test
     t2.shutdown!(grace: "0.2s")
     t1.roster.merge([{ "addr" => t2.advertise, "incarnation" => dead_incarnation, "status" => "dead",
                        "roles" => [], "protocol" => 1 }])
-    wait_until { t1.playbill.owner_address("troupe", "Worker", "f#{key}") == t1.advertise }
+    wait_until { t1.playbill.owner_address(t1.config.namespace, "Worker", "f#{key}") == t1.advertise }
     # 环上归我之后还需等旧租约到期才能接管（所有权激活前置，DESIGN §6.5）
     agent2 = nil
     wait_until(15) do
@@ -153,9 +153,9 @@ class ClusterTest < Minitest::Test
     assert_equal 2, detail["fencingToken"], "接管后 epoch 单调递增"
 
     # 旧 Stage（若复活）的旧 token 写入会被拒绝
-    stored = store.read("troupe", "Worker", "f#{key}")
+    stored = store.read(t1.config.namespace, "Worker", "f#{key}")
     assert_raises(Troupe::ConflictError) do
-      store.write("troupe", "Worker", "f#{key}", stored.props.merge("n" => 999),
+      store.write(t1.config.namespace, "Worker", "f#{key}", stored.props.merge("n" => 999),
                   expected_revision: stored.revision, schema_version: 1, fencing_token: 1)
     end
   end
@@ -164,10 +164,10 @@ class ClusterTest < Minitest::Test
     t1 = form_troupe
     t2 = form_troupe(seeds: [t1.advertise])
     wait_until { t1.roster.alive_peers.include?(t2.advertise) }
-    key = (0..50).find { |i| t1.playbill.owner_address("troupe", "Worker", "h#{i}") == t2.advertise }
+    key = (0..50).find { |i| t1.playbill.owner_address(t1.config.namespace, "Worker", "h#{i}") == t2.advertise }
 
     # 已带 2 跳的转发请求再进 t1（环漂移场景）→ 显式拒绝，防环（DESIGN §6.3）
-    call = Troupe::Call.new(namespace: "troupe", role_id: "Worker", stage_name: "h#{key}",
+    call = Troupe::Call.new(namespace: t1.config.namespace, role_id: "Worker", stage_name: "h#{key}",
                             method: :value, args: [],
                             deadline_ms: Troupe::Util.now_ms + 3000, source: :remote, hop: 2)
     e = assert_raises(Troupe::CallRejectedError) { t1.dispatch_inbound(call) }

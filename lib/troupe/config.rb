@@ -23,7 +23,10 @@ module Troupe
       cfg.mode = opts[:mode] || env["TROUPE_MODE"] || "dev"
       cfg.rehearsal = opts.fetch(:rehearsal, env["TROUPE_ENV"] == "test")
       cfg.transport_enabled = opts.fetch(:transport, !cfg.rehearsal)
-      cfg.namespace = opts[:namespace] || env["TROUPE_NAMESPACE"] || File.basename(Dir.pwd)
+      # namespace 默认固定值（对齐 troupejs）：不随工作目录名漂移——
+      # Props/Cue key 含 namespace，目录改名即读不到既有数据（Issue #2）。
+      # 多套共存场景请显式传 namespace 或 TROUPE_NAMESPACE。
+      cfg.namespace = opts[:namespace] || env["TROUPE_NAMESPACE"] || "default"
       cfg.host = opts[:host] || env["TROUPE_HOST"] || (cfg.mode == "production" ? "0.0.0.0" : "127.0.0.1")
       cfg.port = Integer(opts[:port] || env["TROUPE_PORT"] || 7300)
       cfg.advertise = opts[:advertise] || env["TROUPE_ADVERTISE"]

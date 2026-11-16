@@ -1,0 +1,28 @@
+# Troupe.rb CI（ROADMAP M0）：Ruby 支持矩阵 3.2/3.3/3.4/4.0 × ubuntu/windows。
+# 约定：任何 job 显式 skip 即视为失败（后续 PG 必跑 leg 沿用此纪律，M2 引入）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ruby-${{ matrix.ruby }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        ruby: ["3.2", "3.3", "3.4", "4.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+      - name: Run test suite
+        run: bundle exec rake test
+        env:
+          TROUPE_LOG: fatal

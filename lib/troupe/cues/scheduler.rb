@@ -5,14 +5,24 @@ require_relative "../util"
 require_relative "cue_store"
 
 module Troupe
-  # Cue 调度器（DESIGN §7.5）：每 Stage 一个 tick 线程。
+  # Cue 调度器（DESIGN §7.5）：每 Stage 一个 tick 线程 + 有界投递工作池（Issue #6）。
   # due() 发现 → claim() 在多个 Stage 间分配执行责任 → on_cue 作为一条 Call
   # 进入 CallBoard（受同一调度约束）→ complete() 以 statusVersion 裁决。
   # 至少一次投递：执行中宕机 → 租约到期被重新认领、重复投递。
+  #
+  # 投递池（借鉴 dispatcher_pool 经验，一切有界）：
+  #   * WORKERS 条复用 worker，不再"每条到期提醒新建线程"（单 tick 大量到期
+  #     不再瞬时膨胀线程）；QUEUE_DEPTH 满即显式跳过本轮（背压），租约到期重投，
+  #     不无限堆积内存；
+  #   * stop() 先停 tick，再按序 drain 投递队列（存量提醒处理完 worker 才退出），
+  #     宽限期内未完成的慢投递记录日志后放弃（进程停机不被单个慢 on_cue 挂住）。
   class CueScheduler
     BATCH = 64
+    WORKERS = 8
+    QUEUE_DEPTH = 256
+    DRAIN_GRACE_S = 5.0
 
-    attr_reader :troupe, :store
+    attr_reader :troupe, :store, :workers
 
     def initialize(troupe, store)
       @troupe = troupe
@@ -22,9 +32,14 @@ module Troupe
       @stopped = false
       @sleeper = Util::Sleeper.new
       @thread = nil
+      @queue = SizedQueue.new(QUEUE_DEPTH)
+      @workers = []
+      @started = false
+      @workers_lock = Mutex.new
     end
 
     def start
+      start_workers
       @thread = Thread.new do
         begin
           Thread.current.name = "troupe-cues"
@@ -40,12 +55,15 @@ module Troupe
       rescue StandardError => e
         Log.error("cue 调度线程退出：#{e.class}: #{e.message}")
       end
+      nil
     end
 
     def stop
       @stopped = true
       @sleeper.cancel
       @thread&.join(1)
+      drain_workers
+      nil
     end
 
     def tick
@@ -53,15 +71,26 @@ module Troupe
       records = store.due(now, BATCH)
       records.each do |rec|
         next if rec.namespace != @troupe.config.namespace # 多 Troupe 共享存储时只管自己的命名空间
+        next if queue_full?(rec) # 有界背压：满则本轮不认领，租约到期重投
 
         version = store.claim(rec.id, owner: @troupe.owner_id, lease_until: now + @lease_ms)
         next unless version
 
-        # 认领成功即负责投递；投递异步化，不阻塞同一 tick 的其他提醒
-        Thread.new(rec, version) { |r, v| deliver(r, v) }
+        # 预检通过后再入队：极端并发下队列恰满时 push 短暂阻塞，
+        # 最多等一个 worker 完成当前投递（有界等待，非死锁）
+        @queue.push([rec, version])
       end
     rescue StandardError => e
       Log.error("cue tick 异常：#{e.class}: #{e.message}")
+    end
+
+    # 队列深度预算检查（认领前）：满则本轮跳过，避免占着租约排队
+    # （Ruby 4.0 起 Queue#push 移除 non_block 关键字，背压用预检实现）
+    def queue_full?(rec)
+      return false if @queue.size < QUEUE_DEPTH
+
+      Log.warn("提醒 #{rec.id} 到期但投递队列已满（#{QUEUE_DEPTH}）：本轮跳过（租约到期重投，背压）")
+      true
     end
 
     def deliver(rec, claimed_version)
@@ -100,6 +129,51 @@ module Troupe
                    ))
       Log.debug("持久提醒已注册：#{id} schedule=#{schedule} next_due=#{Time.at(next_due / 1000.0)}")
       id
+    end
+
+    # ---- 有界投递工作池 ----
+
+    def start_workers
+      @workers_lock.synchronize do
+        return if @started
+
+        @started = true
+        @workers = Array.new(WORKERS) { |i| worker_thread(i) }
+      end
+      nil
+    end
+
+    def worker_thread(i)
+      t = Thread.new do
+        begin
+          Thread.current.name = "troupe-cue-worker-#{i}"
+        rescue StandardError
+          nil
+        end
+        loop do
+          item = @queue.pop
+          break if item.equal?(:stop)
+
+          deliver(item[0], item[1])
+        rescue StandardError => e
+          # 兜底：deliver 内部已救援投递异常；这里防御完成裁决自身 bug，不让 worker 消失
+          Log.error("cue worker 异常：#{e.class}: #{e.message} #{e.backtrace&.first}")
+        end
+      end
+      t
+    end
+
+    # 停机 drain：:stop 哨兵排在存量任务之后——先处理完已入队提醒再退出；
+    # 宽限期内未退出的 worker（慢 on_cue）记录日志后放弃，不挂住停机。
+    def drain_workers
+      return unless @started
+
+      WORKERS.times { @queue << :stop }
+      @workers.each do |t|
+        t.join(DRAIN_GRACE_S) or
+          Log.error("cue worker 宽限 #{DRAIN_GRACE_S}s 内未退出（慢 on_cue？）：停机放弃等待")
+      end
+      nil
     end
   end
 end

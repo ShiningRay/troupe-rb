@@ -201,7 +201,9 @@ module Troupe
       Log.warn("#{self.class.name} 收到未处理的提醒 #{name.inspect}")
     end
 
-    # 结构迁移（DESIGN §7.4）：stored.schema_version < 类版本时逐级调用
+    # 结构迁移（DESIGN §7.4）：stored.schema_version < 类版本时，框架逐级
+    # （v → v+1）调用本方法，from_version 即当前步的源版本；跨多版本时每一步
+    # 都必须可迁移，缺失中间步骤即抛本异常（失败不落盘，激活中止）。
     def migrate_props(stored, from_version)
       raise MigrationError,
             "#{self.class.name}（#{role_id}）Props schema_version=#{from_version} < 目标 #{self.class.schema_version}，" \

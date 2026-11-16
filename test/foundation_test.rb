@@ -4,8 +4,9 @@ require_relative "test_helper"
 
 class CodecTest < Minitest::Test
   def test_primitives_pass_through
-    assert_same Troupe::Codec.copy(1), 1
-    assert_same Troupe::Codec.copy(nil), nil
+    # Minitest 6 起对 nil/immediate 值 assert_same 直接报错：语义用 assert_nil/assert_equal 表达
+    assert_equal 1, Troupe::Codec.copy(1)
+    assert_nil Troupe::Codec.copy(nil)
     assert_equal "s", Troupe::Codec.copy("s")
     # 字符串走 JSON round-trip：内容恒等
     assert_equal "中文", Troupe::Codec.copy("中文")
@@ -204,5 +205,58 @@ class CronTest < Minitest::Test
   def test_invalid_expr_raises
     assert_raises(ArgumentError) { Troupe::Cron.parse!("* * * *") }
     assert_raises(ArgumentError) { Troupe::Cron.parse!("61 * * * *") }
+  end
+end
+
+# namespace 配置（Issue #2）：默认值固定，不随工作目录名漂移；显式配置优先
+class ConfigNamespaceTest < Minitest::Test
+  class NsProbeActor < Troupe::Actor
+    role_id "nsprobe"
+    initial_props { { "n" => 0 } }
+
+    def touch
+      props["n"] += 1
+      save_props
+      props["n"] # save_props 返回 revision，这里断言的是业务值
+    end
+
+    def n
+      props["n"]
+    end
+  end
+
+  def test_default_namespace_is_stable_not_cwd
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        assert_equal "default", Troupe::Config.resolve.namespace,
+                     "默认 namespace 是固定值，不得取 File.basename(Dir.pwd)"
+      end
+    end
+  end
+
+  def test_namespace_priority_explicit_over_env_over_default
+    assert_equal "default", Troupe::Config.resolve.namespace
+
+    ENV["TROUPE_NAMESPACE"] = "ns-env"
+    assert_equal "ns-env", Troupe::Config.resolve.namespace
+    assert_equal "ns-explicit", Troupe::Config.resolve(namespace: "ns-explicit").namespace
+  ensure
+    ENV.delete("TROUPE_NAMESPACE")
+  end
+
+  def test_rehearsal_fixed_namespace_reads_existing_props_in_any_dir
+    store = Troupe::MemoryPropStore.new
+    # 预置既有 Props（任意目录名下都应读到，模拟迁移/接管场景）
+    store.create("rehearsal-ns", "nsprobe", "fixed", { "n" => 41 }, schema_version: 1)
+    t = nil
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        t = Troupe::Testing.rehearsal(actors: [NsProbeActor], prop_store: store, namespace: "rehearsal-ns")
+        assert_equal 41, t.cast(NsProbeActor, "fixed").n, "迁移/接管场景确实读取既有 Props"
+        assert_equal 42, t.cast(NsProbeActor, "fixed").touch
+      end
+    end
+  ensure
+    t&.shutdown!
   end
 end

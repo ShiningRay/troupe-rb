@@ -98,13 +98,24 @@ class ImprovTest < Minitest::Test
     assert_equal %w[improv-start improv-end strict-start strict-end], tl.first(4)
   end
 
-  def test_strict_fifo_order
+  # 串行承诺：strict Turn 逐条执行、成对不交错。
+  # 注：并发调用方的"入队顺序"由各线程实际到达 CallBoard 的时刻决定（Ruby 线程
+  # 调度），框架不承诺"创建顺序 = 执行顺序"——那是对测试自身的误断；可验证的是
+  # 每个 strict-start 都紧跟 strict-end（严格串行）且 5 条全部执行。
+  def test_strict_turns_serial_and_paired
     a = @troupe.cast(SessionActor, "s4")
     order = Queue.new
     threads = Array.new(5) { |i| Thread.new { a.strict(10); order << i } }
     threads.each(&:join)
-    results = 5.times.map { order.pop }
-    assert_equal [0, 1, 2, 3, 4], results, "strict 启动按 FIFO"
+    assert_equal 5, order.size, "5 条 strict 全部执行完毕"
+
+    tl = a.timeline
+    starts = tl.each_index.select { |i| tl[i] == "strict-start" }
+    assert_equal 5, starts.size
+    starts.each do |i|
+      assert_equal "strict-end", tl[i + 1],
+                   "strict-start 后必须紧跟其 strict-end（严格串行：上一 Turn settle 前不取下一 Call）"
+    end
   end
 
   def test_quiesce_waits_all_in_flight

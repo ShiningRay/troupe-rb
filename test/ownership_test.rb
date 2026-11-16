@@ -47,8 +47,9 @@ class OwnershipTest < Minitest::Test
     assert_equal 5, a.bump(5)
     assert_equal 1, troupe_a.stage_manager.inspect_cell("Counter", "shared-1")["fencingToken"]
 
-    # 顶替：把租约拨到过期，B 抢到 epoch 2
-    store.ownership_record("troupe", "Counter", "shared-1")[:lease_until] = Troupe::Util.now_ms - 1
+    # 顶替：把租约拨到过期，B 抢到 epoch 2（namespace 用配置值，不依赖目录名）
+    ns = troupe_a.config.namespace
+    store.ownership_record(ns, "Counter", "shared-1")[:lease_until] = Troupe::Util.now_ms - 1
     b = troupe_b.cast(CounterActor, "shared-1")
     assert_equal 5, b.value # B 触发激活，以完整 Props 重新登台
     assert_equal 2, troupe_b.stage_manager.inspect_cell("Counter", "shared-1")["fencingToken"]
@@ -87,7 +88,7 @@ class OwnershipTest < Minitest::Test
     b = Troupe::Testing.rehearsal(actors: [CounterActor], prop_store: store, ownership_acquire_timeout: "1s")
     a.cast(CounterActor, "x").bump(7)
 
-    store.ownership_record("troupe", "Counter", "x")[:lease_until] = Troupe::Util.now_ms - 1
+    store.ownership_record(a.config.namespace, "Counter", "x")[:lease_until] = Troupe::Util.now_ms - 1
     assert_equal 7, b.cast(CounterActor, "x").value # B 以完整 Props 重新登台
 
     a.shutdown!

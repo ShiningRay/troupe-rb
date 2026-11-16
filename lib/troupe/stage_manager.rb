@@ -821,24 +821,35 @@ module Troupe
       end
     end
 
-    # schemaVersion 驱动迁移（DESIGN §7.4）：迁移后 CAS 提交；失败明确报错、不以半迁移状态服务
+    # schemaVersion 驱动迁移（DESIGN §7.4）：逐级 v → v+1 循环执行（Issue #3），
+    # migrate_props(props, v) 每次只负责 v → v+1 一步；Actor 未提供某一步（含缺失中间版本）
+    # 即抛 MigrationError。全部步骤在内存完成后单次 CAS 提交——任一步失败不落盘，
+    # 不以半迁移状态服务。迁移后 CAS 提交；并发迁移以已提交版本为准。
     def run_migration(klass, store, props, stored)
+      from = stored.schema_version
+      target = klass.schema_version
       temp = klass.new(ActorContext.new(self, props))
+      migrated = Codec.copy(props)
+      step = from
       begin
-        migrated = temp.migrate_props(props, stored.schema_version)
+        (from...target).each do |v|
+          step = v
+          migrated = Codec.copy(temp.migrate_props(migrated, v))
+        end
       rescue MigrationError
         raise
       rescue StandardError => e
-        raise MigrationError, "#{label} Props 迁移失败（#{stored.schema_version} → #{klass.schema_version}）：#{e.class}: #{e.message}"
+        raise MigrationError,
+              "#{label} Props 迁移失败（#{from} → #{target}，step #{step}）：#{e.class}: #{e.message}"
       end
       migrated = Codec.copy(migrated)
       begin
         store.write(@namespace, @role_id, @stage_name, migrated,
-                    expected_revision: stored.revision, schema_version: klass.schema_version,
+                    expected_revision: stored.revision, schema_version: target,
                     fencing_token: @fencing_token)
       rescue ConflictError
         again = store.read(@namespace, @role_id, @stage_name)
-        if again && again.schema_version >= klass.schema_version
+        if again && again.schema_version >= target
           return Codec.copy(again.props) # 并发迁移：以已提交版本为准
         end
         raise MigrationError, "#{label} Props 迁移提交冲突：#{role_id} schema_version=#{stored.schema_version}"
