@@ -139,6 +139,7 @@ bundle exec rake test
 - **每在场 Actor 一个调度线程**：Ruby 线程成本高于 JS Promise，高 churn 场景建议调低 Intermission 或提高 `activation_limit` 前评估内存
 - **PStore/SQLite 均为进程级持久**：多节点生产的共享 PropStore（Postgres）未实现前，集群故障恢复仅在共享内存 Store（同进程多 Stage）或同机单进程内成立
 - **存储信封（M1）**：PropStore 记录的 props 字段为 `{__troupe_envelope__: 1, props, idem}`；旧数据（裸 Props）可直接读取，但新数据被旧版本 trouperb 读取会把信封键当作业务 Props——PStore 为开发级存储，跨版本升级请先排空
+- **PStore 写入为 O(全库)**（PStore 每次事务重写整个文件）：仅限开发/小数据量，Actor 数量大时用 SQLite 或 PostgreSQL Provider
 - **生产门禁（M2）**：production + transport 模式拒绝非 cross_node_safe 存储（PStore/SQLite/Memory），显式 `allow_unsafe_store: true` 可降级（单机演示自担风险）
 - **TLS 未实现**：节点间认证依赖受控网络 + cluster token（常时比较、支持 rotate/grace/revoke）；TLS 门控参照 troupejs secureConnect，需时再补
 - 本地调用默认走同一 JSON 编解码边界：Hash 键归一为字符串、Symbol → String、Time → ISO 8601；`local_call_by_reference: true` 可显式关闭复制换性能（语义分叉自担）

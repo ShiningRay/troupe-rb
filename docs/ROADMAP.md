@@ -66,14 +66,14 @@
 
 ## M5 跟随统一规划的决策项（不单方面实施）
 
-- [ ] 版本化目录 / 放置策略 / 再平衡：等 troupe-planning 对目录形态（共享存储目录 vs DHT）出 ADR。
-- [ ] Booth 仪表盘 / BoxOffice 网关：参照 js 实现，优先级低于核心。
-- [ ] 滚动升级/热替换：先文档化 drain→upgrade 流程；R1–R6 兼容规则审查。
-- [ ] 分布式事务：与两兄弟一致，长期非目标。
+- [ ] 版本化目录 / 放置策略 / 再平衡：**阻塞中**——等 troupe-planning 对目录形态（共享存储目录 vs DHT）出 ADR（不单方面实施）。
+- [ ] Booth 仪表盘 / BoxOffice 网关：参照 js 实现，优先级低于核心（Booth 桥原型已在 examples/booth 草案，未纳入 gem）。
+- [x] 滚动升级/热替换：已文档化 drain→upgrade 流程与 R1–R6 兼容审查清单（[ROLLING_UPGRADE.md](./ROLLING_UPGRADE.md)；hello 协商使跨协议版本必须整批升级——文档明确）。
+- [x] 分布式事务：与两兄弟一致，长期非目标（无需实施，文档口径一致）。
 
 ## Ruby 特有工效债（穿插在 M1/M2 间处理，不阻塞门禁）
 
 - [ ] kwargs RPC 支持与版本化编码（当前不支持；不得引入 Marshal 作公共协议）。
-- [ ] `Troupe::Troupe` 常量遮蔽解决（breaking change，择窗口期）。
+- [ ] `Troupe::Troupe` 常量遮蔽解决（breaking change，择窗口期；M3 OTel 实现已遇 `Troupe::VERSION` 被解析为 `Troupe::Troupe::VERSION`——库内用 `::Troupe::` 顶层限定规避）。
 - [ ] 线程模型基准对比：thread_per_cell（默认）vs shared 池 vs Fiber 方案，报告**默认配置**数字而非 opt-in 最优（吸取 bench-suite 教训：shared 2.77KB/Actor 与默认 47.52KB 不可混用）。
-- [ ] PStore O(全库) 写入问题：限开发并文档声明。
+- [x] PStore O(全库) 写入问题：限开发并文档声明（README 已知边界 + gemspec 注释明确开发级定位）。
