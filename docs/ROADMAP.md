@@ -66,8 +66,8 @@
 
 ## M5 跟随统一规划的决策项（不单方面实施）
 
-- [ ] 版本化目录 / 放置策略 / 再平衡：**阻塞中**——等 troupe-planning 对目录形态（共享存储目录 vs DHT）出 ADR（不单方面实施）。
-- [ ] Booth 仪表盘 / BoxOffice 网关：参照 js 实现，优先级低于核心（Booth 桥原型已在 examples/booth 草案，未纳入 gem）。
+- [ ] 版本化目录 / 放置策略 / 再平衡：**阻塞中**——等 troupe-planning ADR-002（HashRing+ownership 与版本化 directory 的演进，计划中未出稿）再实施（不单方面实施）。
+- [x] Booth 仪表盘 / BoxOffice 网关：**由 troupe-planning ADR-0007（Accepted）裁决**——外部端点分四层，网关（外部客户端↔actor 传输桥）归伴生包 `troupe-gateway`（L3），core 保持零 HTTP/WS 依赖（L1/L2）；trouperb 不内置 Booth/BoxOffice，Booth 桥原型留 examples/booth 草案供伴生包参考。
 - [x] 滚动升级/热替换：已文档化 drain→upgrade 流程与 R1–R6 兼容审查清单（[ROLLING_UPGRADE.md](./ROLLING_UPGRADE.md)；hello 协商使跨协议版本必须整批升级——文档明确）。
 - [x] 分布式事务：与两兄弟一致，长期非目标（无需实施，文档口径一致）。
 
