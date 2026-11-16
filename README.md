@@ -88,6 +88,8 @@ ruby bin/troupe --to 127.0.0.1:7301 ps     # 在场演员（跨 Stage 聚合）
 | 信任边界 | 生命周期钩子/基类成员不可经 RPC；畸形帧可控拒绝 | `test_whitelist_enforced_on_wire`、`test_malformed_frame…` |
 | Show = Actor Audience | 订阅/投递经完整 Turn 管道（白名单/串行/背压），跨 Stage 转发；慢订阅者有界隔离；在线尽力不重投 | `test/show_audience_test.rb` |
 | 接管健康可观测 | leaseRenewFailures/handovers 计数（续租失败 ⊇ 移交） | `test_lease_renew_failure_and_handover_metrics` |
+| 持久流 at-least-once | 消费者失败不 ack → 从游标重放；ack 只前进；保留裁剪显式代价 | `test/m4_streams_test.rb` |
+| Outbox 原子提交 | emit_event 与 Props CAS 同提交，失败写事件不落；dispatcher 退避/死信；Inbox 去重 | `test/m4_streams_test.rb` |
 
 运行全部测试（Ruby ≥ 3.2；CI 矩阵 3.2/3.3/3.4/4.0 × ubuntu/windows）：
 
@@ -125,7 +127,7 @@ bundle exec rake test
 
 ## 实现范围（对照 Troupe.js PLAN）
 
-已实现：**M1** 严格串行运行时 + PropStore 合同（CAS/迁移/校验）；**M2** 本地持久化（PStore）+ TCP 集群（长度前缀 JSON、白名单、背压、畸形帧防护）+ HashRing（纯 Ruby xxh32，160 vnodes）+ 误投转发；**M3** 所有权（租约 + 单调 epoch + fencing）+ Roster（gossip 反熵 + ping/ACK 探测 + 终态不可复活）；**M4** 持久 Cue（CueStore + claim/lease/statusVersion CAS + cron）+ Director/CLI；**M5** 交错执行（组合矩阵 + 写饥饿防护）；**M6** Trace 总线（环形缓冲 + 采样 + 订阅）；**M7** Show（进程内 pub/sub）；**M8（ROADMAP M1）** 语义对齐——协作取消（#7 advisory）、排队/执行超时 phase 分离、错误分类 code 映射（对齐 troupe.cr golden/errors.json）、golden fixtures（xxh32/环/traceparent/信封/wireErr）、传输 hello 版本协商（协议 v2）、存储信封（Props 与幂等记录同行原子落盘）、traceparent 随线路传播、全局背压预算 spec；**M9（ROADMAP M2）** 生产共享状态——PostgreSQL PropStore/CueStore（行级 CAS、DB 时钟租约、单调 epoch、SKIP LOCKED claim）、Provider 能力矩阵 + 生产门禁（cross_node_safe）、Provider 契约测试套件、真实多进程 kill -9 接管验收（CI PG 必跑 leg）、token 常时比较 + rotate/grace/revoke。；**M10（ROADMAP M3）** Show 升级 Actor Audience（完整 Turn 管道交付/边界回调分离/PublishReport、跨 Stage 转发、慢订阅者隔离、在线尽力不重投——明确不叫流）、OTel 零依赖 OTLP JSON 导出适配（sink 回调，传输宿主实现）+ traceparent 贯穿、接管健康指标（leaseRenewFailures/handovers）。
+已实现：**M1** 严格串行运行时 + PropStore 合同（CAS/迁移/校验）；**M2** 本地持久化（PStore）+ TCP 集群（长度前缀 JSON、白名单、背压、畸形帧防护）+ HashRing（纯 Ruby xxh32，160 vnodes）+ 误投转发；**M3** 所有权（租约 + 单调 epoch + fencing）+ Roster（gossip 反熵 + ping/ACK 探测 + 终态不可复活）；**M4** 持久 Cue（CueStore + claim/lease/statusVersion CAS + cron）+ Director/CLI；**M5** 交错执行（组合矩阵 + 写饥饿防护）；**M6** Trace 总线（环形缓冲 + 采样 + 订阅）；**M7** Show（进程内 pub/sub）；**M8（ROADMAP M1）** 语义对齐——协作取消（#7 advisory）、排队/执行超时 phase 分离、错误分类 code 映射（对齐 troupe.cr golden/errors.json）、golden fixtures（xxh32/环/traceparent/信封/wireErr）、传输 hello 版本协商（协议 v2）、存储信封（Props 与幂等记录同行原子落盘）、traceparent 随线路传播、全局背压预算 spec；**M9（ROADMAP M2）** 生产共享状态——PostgreSQL PropStore/CueStore（行级 CAS、DB 时钟租约、单调 epoch、SKIP LOCKED claim）、Provider 能力矩阵 + 生产门禁（cross_node_safe）、Provider 契约测试套件、真实多进程 kill -9 接管验收（CI PG 必跑 leg）、token 常时比较 + rotate/grace/revoke。；**M10（ROADMAP M3）** Show 升级 Actor Audience（完整 Turn 管道交付/边界回调分离/PublishReport、跨 Stage 转发、慢订阅者隔离、在线尽力不重投——明确不叫流）、OTel 零依赖 OTLP JSON 导出适配（sink 回调，传输宿主实现）+ traceparent 贯穿、接管健康指标（leaseRenewFailures/handovers）。；**M11（ROADMAP M4）** 持久流（StreamStore：seq 单调/ack 只前进/游标 replay/保留裁剪/至少一次消费，Memory+PG 双实现）、Outbox（emit_event 与 Props 同原子提交 + 独立 dispatcher：SKIP LOCKED/租约/退避/死信）、幂等 Inbox 去重、事件溯源扩展点（rebuild/快照一致性）。
 
 路线图（见 [DESIGN_NOTES.md](DESIGN_NOTES.md)）：Postgres 共享 PropStore、BoxOffice、Booth、热重载/热替换（Ruby 无 `setPrototypeOf`，L1/L2 需另设计）、Show 跨节点转发、Extra。
 

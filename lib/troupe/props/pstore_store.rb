@@ -62,7 +62,8 @@ module Troupe
       stored
     end
 
-    def write(ns, role_id, stage_name, props, expected_revision:, schema_version:, fencing_token: 0)
+    def write(ns, role_id, stage_name, props, expected_revision:, schema_version:, fencing_token: 0, outbox: [])
+      raise NotImplementedError, "#{self.class.name} 未实现 Outbox（开发级存储，Outbox 用 Memory/PG Provider）" if outbox && !outbox.empty?
       k = PropStore.key(ns, role_id, stage_name)
       stored = nil
       @backend.transaction do |db|

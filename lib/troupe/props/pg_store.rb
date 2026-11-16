@@ -85,27 +85,44 @@ module Troupe
     # 单条 UPDATE：CAS（revision）+ fencing（所有权表 epoch 匹配 + 租约有效）原子完成。
     # 所有权表是 fencing 权威（对齐 cr：props 行的 epoch 列只随写入前移，不做 WHERE 条件——
     # 否则接管者首次写会被旧行 epoch 挡住）。token=0（无所有权开发流）退化为纯 CAS。
+    # outbox（M4）：与 Props UPDATE 同事务提交（任一失败整体回滚——"同原子提交"结构性保障）。
     # 0 行 → 精确诊断：fencing 优先于 CAS（对齐 cr docs/persistence.md）。
-    def write(ns, role_id, stage_name, props, expected_revision:, schema_version:, fencing_token: 0)
+    def write(ns, role_id, stage_name, props, expected_revision:, schema_version:,
+              fencing_token: 0, outbox: [])
       k = key(ns, role_id, stage_name)
       payload = JSON.generate(props)
-      rows = exec(
-        "UPDATE troupe_props SET props = $2, revision = revision + 1, schema_version = $3, " \
-        "fence = GREATEST(fence, $4), epoch = $4 " \
-        "WHERE actor_key = $1 AND revision = $5 " \
-        "AND $4 > 0 " \
-        "AND (SELECT epoch FROM troupe_ownership WHERE actor_key = $1 " \
-        "     AND lease_expires_at > now()) = $4", # epoch 单调且任一时刻唯一持有 → epoch 即权威（对齐 cr）
-        k, payload, schema_version, fencing_token, expected_revision
-      )
-      if rows.zero? && fencing_token.zero?
-        # 无所有权模式（开发用途）：退化为纯 CAS（revision 匹配即可写，fence 单调前移）
-        rows = exec(
-          "UPDATE troupe_props SET props = $2, revision = revision + 1, schema_version = $3, " \
-          "fence = GREATEST(fence, $4) " \
-          "WHERE actor_key = $1 AND revision = $5",
-          k, payload, schema_version, fencing_token, expected_revision
-        )
+      rows = 0
+      @write_lock.synchronize do
+        @conn.transaction do
+          rows = exec_unlocked(
+            "UPDATE troupe_props SET props = $2, revision = revision + 1, schema_version = $3, " \
+            "fence = GREATEST(fence, $4), epoch = $4 " \
+            "WHERE actor_key = $1 AND revision = $5 " \
+            "AND $4 > 0 " \
+            "AND (SELECT epoch FROM troupe_ownership WHERE actor_key = $1 " \
+            "     AND lease_expires_at > now()) = $4", # epoch 单调且任一时刻唯一持有 → epoch 即权威（对齐 cr）
+            k, payload, schema_version, fencing_token, expected_revision
+          )
+          if rows.zero? && fencing_token.zero?
+            # 无所有权模式（开发用途）：退化为纯 CAS（revision 匹配即可写，fence 单调前移）
+            rows = exec_unlocked(
+              "UPDATE troupe_props SET props = $2, revision = revision + 1, schema_version = $3, " \
+              "fence = GREATEST(fence, $4) " \
+              "WHERE actor_key = $1 AND revision = $5",
+              k, payload, schema_version, fencing_token, expected_revision
+            )
+          end
+          if rows.positive?
+            outbox.each do |r|
+              exec_unlocked(
+                "INSERT INTO troupe_outbox (actor_key, event_id, topic, payload, created_at, status, attempts) " \
+                "VALUES ($1, $2, $3, $4, now(), 'pending', 0) " \
+                "ON CONFLICT (actor_key, event_id) DO NOTHING", # 幂等 eventId：重放不重复入队
+                k, r[:event_id] || Util.call_id, r[:topic], JSON.generate(r[:payload])
+              )
+            end
+          end
+        end
       end
       diagnose(k, rows.zero?, expected_revision, fencing_token) if rows.zero?
 
@@ -113,6 +130,63 @@ module Troupe
       raise ConflictError, "Props 写入后读取失败：#{role_id}/#{stage_name}（结果未知，调用方以 read 校验）" unless stored
 
       stored
+    end
+
+    # ---- Outbox dispatcher（M4：SKIP LOCKED 认领 + 租约 + 退避 + 死信） ----
+
+    def claim_outbox_batch(limit:, owner:, lease_ms:)
+      @write_lock.synchronize do
+        @conn.exec_params(
+          "UPDATE troupe_outbox SET status = 'running', owner = $1, " \
+          "lease_until = now() + make_interval(secs => $2::float8), attempts = attempts + 1 " \
+          "WHERE id IN (SELECT id FROM troupe_outbox " \
+          "WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) " \
+          "AND (next_attempt_at IS NULL OR next_attempt_at <= now()) " \
+          "ORDER BY created_at LIMIT $3 FOR UPDATE SKIP LOCKED) " \
+          "RETURNING id, actor_key, event_id, topic, payload, " \
+          "(extract(epoch from created_at) * 1000)::bigint, attempts",
+          [owner, lease_ms / 1000.0, limit]
+        ).values.map do |row|
+          ns, role_id, stage_name = decode_key(row[1])
+          OutboxRecord.new(ns, role_id, stage_name, row[2], row[3], JSON.parse(row[4]),
+                           Integer(row[5]), Integer(row[6]), "running")
+        end
+      end
+    end
+
+    def outbox_mark_delivered(record)
+      @write_lock.synchronize do
+        @conn.exec_params(
+          "UPDATE troupe_outbox SET status = 'sent', lease_until = NULL, owner = NULL " \
+          "WHERE actor_key = $1 AND event_id = $2 AND status = 'running'",
+          [key(record.namespace, record.role_id, record.stage_name), record.event_id]
+        ).cmd_tuples.positive?
+      end
+    end
+
+    def outbox_mark_failed(record, max_attempts:, backoff_ms:)
+      @write_lock.synchronize do
+        row = @conn.exec_params(
+          "UPDATE troupe_outbox SET " \
+          "status = CASE WHEN attempts >= $3 THEN 'dead' ELSE 'pending' END, " \
+          "next_attempt_at = CASE WHEN attempts >= $3 THEN next_attempt_at " \
+          "ELSE now() + make_interval(secs => $4::float8) END, " \
+          "lease_until = NULL, owner = NULL " \
+          "WHERE actor_key = $1 AND event_id = $2 AND status = 'running' " \
+          "RETURNING status",
+          [key(record.namespace, record.role_id, record.stage_name), record.event_id,
+           max_attempts, backoff_ms / 1000.0]
+        ).values[0]
+        row && row[0] == "dead"
+      end
+    end
+
+    def outbox_counts
+      @write_lock.synchronize do
+        @conn.exec_params(
+          "SELECT status, COUNT(*) FROM troupe_outbox GROUP BY status", []
+        ).values.to_h { |st, n| [st, Integer(n)] }
+      end
     end
 
     def delete(ns, role_id, stage_name)
@@ -214,10 +288,26 @@ module Troupe
       "CREATE TABLE IF NOT EXISTS troupe_props (" \
       "actor_key TEXT PRIMARY KEY, props JSONB NOT NULL, revision BIGINT NOT NULL, " \
       "schema_version INTEGER NOT NULL, fence BIGINT NOT NULL DEFAULT 0, epoch BIGINT NOT NULL DEFAULT 0)",
-      "CREATE INDEX IF NOT EXISTS troupe_props_fence_idx ON troupe_props (fence)"
+      "CREATE INDEX IF NOT EXISTS troupe_props_fence_idx ON troupe_props (fence)",
+      "CREATE TABLE IF NOT EXISTS troupe_outbox (" \
+      "id BIGSERIAL PRIMARY KEY, actor_key TEXT NOT NULL, event_id TEXT NOT NULL, " \
+      "topic TEXT NOT NULL, payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL, " \
+      "status TEXT NOT NULL DEFAULT 'pending', attempts INT NOT NULL DEFAULT 0, " \
+      "next_attempt_at TIMESTAMPTZ, lease_until TIMESTAMPTZ, owner TEXT)",
+      "CREATE UNIQUE INDEX IF NOT EXISTS troupe_outbox_event_idx ON troupe_outbox (actor_key, event_id)"
     ].freeze
 
     private
+
+    def exec_unlocked(sql, *params)
+      @conn.exec_params(sql, params).cmd_tuples
+    rescue PG::ConnectionBad, PG::Error => e
+      raise ConflictError, "PropStore 写失败：#{e.message[0, 120]}（结果未知，调用方以 read 校验）"
+    end
+
+    def decode_key(actor_key)
+      JSON.parse(actor_key)
+    end
 
     def query_one(sql, *params)
       @write_lock.synchronize do

@@ -1,18 +1,45 @@
-# 验证基线（2026-11-17，M3 迭代）
+# 验证基线（2026-11-17，M4 迭代）
 
 环境：Windows、Ruby 4.0.6、Bundler 4.0.24；真实 PostgreSQL 15.19（docker `troupe-pg` @127.0.0.1:55444，专用库 `troupe_rb_test`）。
-Issue 对应：M3（Show→Audience 与可观测）。M2/M1/M0 基线见下节存档。
+Issue 对应：M4（持久流与 Outbox）。M3/M2/M1/M0 基线见下节存档。
 
 ## 默认入口
 
 ```sh
 bundle install
 bundle exec rake test                                # 矩阵 leg：PG 项 skip（由专用 PG leg 必跑）
-TROUPE_TEST_PG=postgres://…/troupe_rb_test bundle exec rake test   # PG leg：契约 + 多进程接管
+TROUPE_TEST_PG=postgres://…/troupe_rb_test bundle exec rake test   # PG leg：契约 + 多进程接管 + 流/Outbox
 ```
 
-**结果（PG leg 全量）：179 runs，3080 assertions，0 failures，0 errors，0 skips**（M2 基线 168 → M3 179）。
-矩阵 leg（无 PG env）：179 runs，0 failures，0 errors，20 skips（PG 项让位给专用 leg）。
+**结果（PG leg 全量）：185 runs，3119 assertions，0 failures，0 errors，0 skips**（M3 基线 179 → M4 185）。
+矩阵 leg（无 PG env）：185 runs，0 failures，0 errors，25 skips（PG 项让位给专用 leg）。
+
+## 逐项验证（M4）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| StreamStore 合同 | Memory/PG 同套断言：append seq 单调、read_from 游标后读取、ack GREATEST 只前进（回退拒绝）、消费者失败不 ack 重放（至少一次）、retain 裁剪显式代价 | ✅ |
+| Outbox 原子提交 | emit_event 随 save_props 提交入队；CAS 失败（fencing）写的事件不落（pending 基线不变反例） | ✅ |
+| OutboxDispatcher | 交付→标记 sent；失败→退避重投成功（至少一次）；持续失败→attempts 达上限→死信、不再投递；PG claim 走 SKIP LOCKED | ✅ |
+| Inbox 去重 | record! 首次 true/重复 false（至少一次 → 恰好一次副作用），Memory + PG | ✅ |
+| 事件溯源 | rebuild 全量 == rebuild_from_snapshot 快照+增量（一致性契约反例） | ✅ |
+
+## 发现并顺带修复（M4）
+
+- **Memory write 的诊断顺序**：revision CAS 先于 fencing 检查——接管场景旧持有者收到 CAS 错误而非 fencing（与 PG/cr 的「fencing 优先」不一致）；已对齐。
+- **PG claim SQL 参数错位**（$1 未引用 → IndeterminateDatatype）与 `AND … OR` 优先级（死信行也会被认领）——加括号。
+- **PgInbox.open 误传 String** 给构造器（要求 conn）。
+- 第三次踩「save_props 返回 revision ≠ 业务值」坑——测试 actor 须显式返回业务字段。
+
+## 未验证边界（不伪装绿灯）
+
+- OutboxDispatcher 的进程内周期自动运行未内置（交付回调是宿主业务，测试内手动 poll）——后台线程化归 M5 或按需。
+- 流的集群广播（StreamStore 集群复制）不在本迭代（订阅/消费 API 进程内注册表）。
+- CI 实跑结果待 push 后确认（PG leg 含流/Outbox 真实 PG 契约）。
+
+---
+
+# 存档：M3 基线（2026-11-17，179 runs 全绿）
 
 ## 逐项验证（M3）
 

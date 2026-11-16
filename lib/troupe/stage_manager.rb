@@ -29,16 +29,19 @@ module Troupe
     # 失败/冲突 → 默认实例失效（poison），下次调用从最后已提交快照继续。
     # 存储形态为信封（Envelope.wrap）：用户 Props 与幂等记录同一行原子落盘（对齐 troupejs R6）。
     def save_props
+      batch = @cell.take_outbox_batch
       stored = @troupe.prop_store.write(
         @cell.namespace, @cell.role_id, @cell.stage_name,
         Envelope.wrap(Codec.copy(@props), @cell.idem),
         expected_revision: @cell.revision,
         schema_version: @cell.role_class.schema_version,
-        fencing_token: @cell.fencing_token
+        fencing_token: @cell.fencing_token,
+        outbox: batch
       )
       @cell.revision = stored.revision
       stored.revision
     rescue ConflictError
+      # CAS 失败：Props 未提交，Outbox 事件同样不落（同原子提交）——实例已失效
       @cell.poison!
       raise
     end
@@ -47,6 +50,14 @@ module Troupe
     # 取消是建议——早停后的副作用仍按原契约提交（save_props 照常）
     def cancelled?
       cell.current_cancel_state&.cancelled? || false
+    end
+
+    # Outbox 事件（M4）：记入 Cell 缓冲，随下一次 save_props 与 Props **同一原子提交**
+    # 落盘——杜绝"先副作用后崩溃"；CAS 失败则事件同样不落（与 Props 一致）。
+    # 交付由 OutboxDispatcher 独立进行（至少一次；接收方 Inbox 去重）。
+    def emit_event(topic, payload, event_id: nil)
+      @cell.emit_outbox(topic, payload, event_id: event_id)
+      nil
     end
 
     def register_cue(name, every, blk)
@@ -477,6 +488,9 @@ module Troupe
       @current_call = nil
       # 幂等记录（信封随 Props 原子落盘；框架级重放在 M2/M4 接线，先保形状）
       @idem = {}
+      # Outbox 缓冲（M4）：emit_event 入队，save_props 同事务提交
+      @outbox_buffer = []
+      @outbox_lock = Mutex.new
       # 共享调度：Cell 持有 enqueued 令牌 = 已在共享池就绪队列中（防重复入队/并发处理）
       @shared_dispatcher = manager.shared_dispatcher
       @enqueued = false
@@ -806,6 +820,24 @@ module Troupe
       call.box.settle_error(CallCancelledError.new("已取消：排队阶段（未开始执行、无副作用）"))
       @role_metrics.observe(:rejected, 0.0)
       :queued
+    end
+
+    # ---- Outbox 缓冲（M4） ----
+
+    def emit_outbox(topic, payload, event_id: nil)
+      @outbox_lock.synchronize do
+        @outbox_buffer << { topic: topic, payload: payload, event_id: event_id }
+      end
+      nil
+    end
+
+    # 取走缓冲（save_props 提交时）；提交失败实例失效，事件随 Props 一起不落
+    def take_outbox_batch
+      @outbox_lock.synchronize do
+        batch = @outbox_buffer
+        @outbox_buffer = []
+        batch
+      end
     end
 
     # ---- 激活（single-flight：队列语义天然保证只激活一次，DESIGN §5.2） ----

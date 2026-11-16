@@ -38,10 +38,25 @@ module Troupe
     end
   end
 
+  # OutboxRecord（M4）：Actor 内 emit、随 Props **同一原子提交**落盘，
+  # 由 OutboxDispatcher 独立交付外部副作用（至少一次；接收方用 Inbox 幂等去重）。
+  OutboxRecord = Struct.new(:namespace, :role_id, :stage_name, :event_id, :topic, :payload,
+                            :created_at, :attempts, :status) do
+    def to_h
+      { "namespace" => namespace, "role" => role_id, "stageName" => stage_name,
+        "eventId" => event_id, "topic" => topic, "payload" => payload,
+        "createdAt" => created_at, "attempts" => attempts, "status" => status }
+    end
+  end
+
   # PropStore（道具间）接口合同（DESIGN §7.2）：
   # * create/write 必须原子（如单条 UPDATE … WHERE revision = ?）；
   # * 冲突抛 ConflictError；
   # * 写结果不确定（网络超时）时，调用方以 read 校验实际 revision 后决定，不盲目重写。
+  #
+  # Outbox 合同（M4）：write(outbox: [records]) 与 Props CAS **同一原子提交**
+  # （Memory 同锁、PG 同事务）；claim_outbox_batch / outbox_mark_delivered /
+  # outbox_mark_failed 支撑独立 dispatcher（SKIP LOCKED、租约、退避、死信）。
   class PropStore
     # Provider 能力矩阵（M2，对齐 troupejs）：生产门禁依据——
     # production + transport 模式拒绝非 cross_node_safe Provider（除非显式降级开关）
@@ -58,13 +73,36 @@ module Troupe
       raise NotImplementedError
     end
 
-    # CAS：仅当当前 revision == expected_revision 才写入；返回新 revision，冲突抛 ConflictError
-    def write(_namespace, _role_id, _stage_name, _props, expected_revision:, schema_version:, fencing_token: 0)
+    # CAS：仅当当前 revision == expected_revision 才写入；返回新 revision，冲突抛 ConflictError。
+    # outbox（M4）：随本次写原子提交的事件（emit_event → save_props 路径）
+    def write(_namespace, _role_id, _stage_name, _props, expected_revision:, schema_version:,
+              fencing_token: 0, outbox: [])
       raise NotImplementedError
     end
 
     def delete(_namespace, _role_id, _stage_name)
       raise NotImplementedError
+    end
+
+    # ---- Outbox 独立 dispatcher 合同（M4） ----
+
+    # 认领一批待交付记录（SKIP LOCKED 语义：多 dispatcher 并发不重不漏）；
+    # 认领即租约 + attempts +1。失败重试/死信由 outbox_mark_failed 裁决。
+    def claim_outbox_batch(limit:, owner:, lease_ms:)
+      raise NotImplementedError, "#{self.class.name} 未实现 Outbox"
+    end
+
+    def outbox_mark_delivered(record)
+      raise NotImplementedError
+    end
+
+    # 交付失败：attempts 达 max → 死信（返回 true）；否则退避重排（返回 false）
+    def outbox_mark_failed(record, max_attempts:, backoff_ms:)
+      raise NotImplementedError
+    end
+
+    def outbox_counts
+      {}
     end
 
     # 共享存储能力（多节点生产必需）：承载所有权记录与 fencing（DESIGN §6.5）
@@ -98,6 +136,10 @@ module Troupe
       @mutex = Mutex.new
       @props = {}
       @ownership = {}
+      @outbox = {}
+      @outbox_lease = {}
+      @outbox_owner = {}
+      @outbox_next_try = {}
       @supports_ownership = ownership
       # 进程内共享（同进程多 Stage 集群测试可用），但不跨节点：cross_node_safe=false
       @capabilities = StoreCapabilities.new(false, true, false)
@@ -130,25 +172,99 @@ module Troupe
       end
     end
 
-    def write(ns, role_id, stage_name, props, expected_revision:, schema_version:, fencing_token: 0)
+    def write(ns, role_id, stage_name, props, expected_revision:, schema_version:, fencing_token: 0, outbox: [])
       k = PropStore.key(ns, role_id, stage_name)
       @mutex.synchronize do
         rec = @props[k] || raise(ConflictError, "Props 记录不存在：#{role_id}/#{stage_name}")
-        unless rec[:revision] == expected_revision
-          raise ConflictError, "revision CAS 失败：expected=#{expected_revision} actual=#{rec[:revision]}（#{role_id}/#{stage_name}）"
-        end
+        # fencing 优先于 CAS 诊断（对齐 PG/cr docs/persistence.md）
         if fencing_token < rec[:fence]
           raise ConflictError,
                 "fencing token 过期：token=#{fencing_token} < fence=#{rec[:fence]}，所有权已转移（DESIGN §6.5）"
+        end
+        unless rec[:revision] == expected_revision
+          raise ConflictError, "revision CAS 失败：expected=#{expected_revision} actual=#{rec[:revision]}（#{role_id}/#{stage_name}）"
         end
 
         rec[:props] = Codec.copy(props)
         rec[:revision] += 1
         rec[:schema_version] = schema_version
         rec[:fence] = fencing_token if fencing_token > rec[:fence]
+        # Outbox 与 Props 同锁原子提交（M4）：写失败（raise）则事件同样不落
+        outbox.each do |r|
+          (@outbox[k] ||= []) << OutboxRecord.new(
+            ns, role_id, stage_name, r[:event_id] || Util.call_id, r[:topic],
+            Codec.copy(r[:payload]), Util.now_ms, 0, "pending"
+          )
+        end
         StoredProps.new(props: Codec.copy(rec[:props]), revision: rec[:revision],
                         schema_version: rec[:schema_version], fence: rec[:fence])
       end
+    end
+
+    # ---- Outbox（Memory：语义与 PG 版对齐） ----
+
+    def claim_outbox_batch(limit:, owner:, lease_ms:)
+      now = Util.now_ms
+      claimed = []
+      @mutex.synchronize do
+        @outbox.each_value do |rows|
+          rows.each do |r|
+            next if claimed.size >= limit
+            next if @outbox_next_try[r.event_id] && @outbox_next_try[r.event_id] > now
+
+            claimable = r.status == "pending" ||
+                        (r.status == "running" && (@outbox_lease[r.event_id] || 0) <= now)
+            next unless claimable
+
+            r.attempts += 1
+            r.status = "running"
+            @outbox_lease[r.event_id] = now + lease_ms
+            @outbox_owner[r.event_id] = owner
+            claimed << OutboxRecord.new(*r.to_a)
+          end
+        end
+      end
+      claimed
+    end
+
+    def outbox_mark_delivered(record)
+      @mutex.synchronize do
+        r = find_outbox(record)
+        return false unless r && r.status == "running"
+
+        r.status = "sent"
+        true
+      end
+    end
+
+    def outbox_mark_failed(record, max_attempts:, backoff_ms:)
+      @mutex.synchronize do
+        r = find_outbox(record)
+        return false unless r && r.status == "running"
+
+        if r.attempts >= max_attempts
+          r.status = "dead" # 死信：人工介入
+        else
+          r.status = "pending"
+          @outbox_next_try[r.event_id] = Util.now_ms + backoff_ms
+        end
+        true
+      end
+    end
+
+    def outbox_counts
+      @mutex.synchronize do
+        all = @outbox.values.flatten
+        { "pending" => all.count { |r| r.status == "pending" },
+          "running" => all.count { |r| r.status == "running" },
+          "sent" => all.count { |r| r.status == "sent" },
+          "dead" => all.count { |r| r.status == "dead" } }
+      end
+    end
+
+    # 测试/诊断支持
+    def outbox_records
+      @mutex.synchronize { @outbox.values.flatten.map { |r| OutboxRecord.new(*r.to_a) } }
     end
 
     def delete(ns, role_id, stage_name)
@@ -209,6 +325,13 @@ module Troupe
 
     def snapshot
       @mutex.synchronize { { props: @props.dup, ownership: @ownership.dup } }
+    end
+
+    private
+
+    def find_outbox(record)
+      (@outbox[PropStore.key(record.namespace, record.role_id, record.stage_name)] || [])
+        .find { |r| r.event_id == record.event_id }
     end
 
     def load_raw(hash)

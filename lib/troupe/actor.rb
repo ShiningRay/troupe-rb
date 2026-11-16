@@ -161,6 +161,12 @@ module Troupe
       @props = context.props
     end
 
+    # Outbox 事件（M4）：记入缓冲，随下一次 save_props 与 Props **同一原子提交**落盘；
+    # 由 OutboxDispatcher 独立交付（至少一次，接收方 Inbox 去重）。CAS 失败则事件同样不落。
+    def emit_event(topic, payload, event_id: nil)
+      @context.emit_event(topic, payload, event_id: event_id)
+    end
+
     # 协作取消检查点（Issue #7，advisory）：cancellable 标注的方法在执行期间轮询；
     # 取消是建议——早停后的副作用仍按原契约提交（save_props 照常），调用方只看到
     # 自己的超时（结果未知 ≠ 失败）。普通方法恒 false，行为与旧版本一致。

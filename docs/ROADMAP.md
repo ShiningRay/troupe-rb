@@ -58,11 +58,11 @@
 
 ## M4 持久流与 Outbox（M2 之后；学 js ADR 0005 / cr M5–M6）
 
-- [ ] PostgreSQL StreamStore：每 topic 单调 seq、幂等 eventId、ack 只前进、游标 replay、保留策略；消费者失败不 ack 重投。
-- [ ] Outbox：`publish` 与 Props 写同事务提交 + 独立 dispatcher（SKIP LOCKED、租约、退避、死信）；幂等 Inbox 去重。
-- [ ] 事件溯源 pattern（学 cr M6）：append envelope + fold 重建 + 快照一致性；作为扩展点而非默认存储。
+- [x] StreamStore（Memory + PostgreSQL）：seq 全局/per-topic 单调持久、幂等 eventId、ack GREATEST 只前进（回退拒绝）、游标 replay、保留裁剪；消费者失败不 ack 重投（至少一次）。
+- [x] Outbox：Actor `emit_event` 与 Props CAS **同一原子提交**（失败写事件不落——反例测试）+ 独立 OutboxDispatcher（PG SKIP LOCKED 认领 + 租约 + 退避 + 死信；Memory 语义对齐）；幂等 Inbox 去重（Memory + PG）。
+- [x] 事件溯源 pattern（学 cr M6）：rebuild 全量重放 + rebuild_from_snapshot 快照加速（一致性反例：快照+增量 == 全量）；作为扩展点而非默认存储。
 
-**门禁**：流重放/保留/慢消费者、outbox 至少一次 + 死信路径有测试；不宣称 exactly-once。
+**门禁**：流重放/保留/慢消费者、outbox 至少一次 + 死信路径有测试；不宣称 exactly-once。（本地 185 runs 全绿 ×2 含 PG；Memory/PG 同套合同断言）
 
 ## M5 跟随统一规划的决策项（不单方面实施）
 
