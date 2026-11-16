@@ -11,12 +11,29 @@ class ImprovTest < Minitest::Test
 
     improv :slow_improv
     read_only :slow_read, :peek
+    improv :grind # 调度矩阵（M1）：cancellable × improv
+    cancellable :grind
 
     def slow_improv(ms = 200)
       props["timeline"] << "improv-start"
       sleep(ms / 1000.0)
       props["timeline"] << "improv-end"
       "improv"
+    end
+
+    # 长任务：检查点轮询 cancelled?，取消后自愿早停（Issue #7）
+    def grind(steps = 100)
+      steps.times do
+        break if cancelled?
+
+        sleep 0.01
+        props["timeline"] << "grind"
+      end
+      "grind-done"
+    end
+
+    def on_cancel
+      props["timeline"] << "cancel-hook"
     end
 
     def slow_read(ms = 200)
@@ -129,6 +146,23 @@ class ImprovTest < Minitest::Test
     assert_includes a.timeline, "read-end"
     t1.join
     t2.join
+  end
+
+  # 调度矩阵（M1）：cancellable × improv —— improv 方法同样收到协作取消，
+  # 检查点退出 + on_cancel 钩子；未取消时完整执行
+  def test_cancellable_improv_method_cooperative_cancel
+    a = @troupe.cast(SessionActor, "s6")
+
+    e = assert_raises(Troupe::CallTimeoutError) { a.with_timeout("0.08s").grind(100) }
+    assert_equal :executing, e.phase
+
+    wait_until(5) { a.timeline.include?("cancel-hook") } # on_cancel 在 Turn settle 后触发
+    ground_count = a.timeline.count("grind")
+    assert_operator ground_count, :<, 100, "长循环在检查点自愿早停"
+    assert_operator ground_count, :>, 0, "已产生的部分副作用保留"
+
+    # 未取消：完整执行完
+    assert_equal "grind-done", a.grind(3)
   end
 
   def test_annotation_requires_existing_method

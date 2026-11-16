@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "securerandom"
 require_relative "errors"
 require_relative "util"
 
@@ -217,6 +218,25 @@ module Troupe
       (filter["role"].nil? || ev["role"] == filter["role"]) &&
         (filter["method"].nil? || ev["method"] == filter["method"]) &&
         (filter["stageName"].nil? || ev["stageName"] == filter["stageName"])
+    end
+  end
+
+  # W3C traceparent（M1 golden 锚点 / §11.4）：调用链跨 Stage 传播的载体。
+  # 形状 00-<32hex traceId>-<16hex spanId>-01；生成与解析与 troupejs protocol-v2
+  # golden fixtures 对齐（同名向量，跨语言一致）。
+  module TraceContext
+    FORMAT = /\A00-([0-9a-f]{32})-([0-9a-f]{16})-01\z/.freeze
+
+    module_function
+
+    def new_span
+      "00-#{SecureRandom.hex(16)}-#{SecureRandom.hex(8)}-01"
+    end
+
+    # 合法 traceparent → traceId（32 hex）；非法/垃圾输入 → nil
+    def trace_id_of(traceparent)
+      m = FORMAT.match(traceparent.to_s)
+      m && m[1]
     end
   end
 end

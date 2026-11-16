@@ -104,7 +104,8 @@ class RuntimeTest < Minitest::Test
     # deadline 已过 → 不开始执行、无副作用（DESIGN §5.1）
     call = Troupe::Call.new(namespace: troupe.config.namespace, role_id: "Counter", stage_name: "c1",
                             method: :bump, args: [7], deadline_ms: Troupe::Util.now_ms - 10)
-    assert_raises(Troupe::CallTimeoutError) { troupe.stage_manager.deliver(call) }
+    e = assert_raises(Troupe::CallTimeoutError) { troupe.stage_manager.deliver(call) }
+    assert_equal :queued, e.phase, "排队过期 phase=queued（与执行超时分离，M1 语义矩阵）"
     assert_equal 0, cart.value, "排队过期不执行"
   end
 
@@ -118,6 +119,7 @@ class RuntimeTest < Minitest::Test
     end
     caller_wait = Troupe::Util.mono - t0
     assert_match(/结果未知/, e.message) # 结果未知语义（DESIGN §6.5）
+    assert_equal :executing, e.phase, "执行超时 phase=executing（与排队过期分离，M1 语义矩阵）"
     assert_operator caller_wait, :<, 0.5, "调用方按时放弃等待"
 
     # 执行占用保持到原执行 settle：后续 Call 等它结束才开始（不交错）
@@ -195,7 +197,8 @@ class RuntimeTest < Minitest::Test
     cart.bump(7)
     troupe.drain_all(timeout: 5)
     stored = store.read(troupe.config.namespace, "Counter", "d1")
-    assert_equal 7, stored.props["n"]
+    # 存储形态是信封（M1 对齐 troupejs R6）：用户 Props 与幂等记录同一行原子落盘
+    assert_equal 7, Troupe::Envelope.unwrap(stored.props)[:props]["n"]
   end
 
   class SlowGateActor < Troupe::Actor
@@ -255,6 +258,22 @@ class RuntimeTest < Minitest::Test
       errors << e
     end
     assert_equal 1, errors.size, "激活数超限显式拒绝：恰好一个失败"
+  end
+
+  # 全局背压预算（M1）：排队字节超限显式拒绝；pop 释放预算（有界一切）
+  def test_queue_bytes_budget_rejects_overload
+    budget = Troupe::ByteBudget.new(300)
+    board = Troupe::CallBoard.new(limit: 100, budget: budget)
+    small = Troupe::Call.new(namespace: "ns", role_id: "r", stage_name: "s", method: :bump,
+                             args: [1], deadline_ms: Troupe::Util.now_ms + 3000)
+    2.times { board.push!(small) }
+    big = Troupe::Call.new(namespace: "ns", role_id: "r", stage_name: "s", method: :bump,
+                           args: ["x" * 600], deadline_ms: Troupe::Util.now_ms + 3000)
+    e = assert_raises(Troupe::BackpressureError) { board.push!(big) }
+    assert_match(/排队字节预算超限/, e.message)
+    assert_equal "backpressure", e.reject_reason
+    2.times { board.pop(timeout: 0.1) }
+    assert_equal 0, budget.used, "pop 释放字节预算"
   end
 
   def test_local_call_copy_boundary

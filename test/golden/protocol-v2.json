@@ -1,0 +1,66 @@
+{
+  "protocolVersion": 2,
+  "frame": {
+    "description": "4 字节小端长度前缀 + UTF-8 JSON；无 magic/CRC（现状锚定，见 ADR 0003）"
+  },
+  "xxh32": {
+    "ns:Cart:k1": 2646418494,
+    "ns:Cart:k2": 3756641947
+  },
+  "hashRing": {
+    "nodes": [
+      "127.0.0.1:7001",
+      "127.0.0.1:7002",
+      "127.0.0.1:7003"
+    ],
+    "assignments": {
+      "ns:Cart:k1": "127.0.0.1:7002",
+      "ns:Cart:k2": "127.0.0.1:7002",
+      "ns:role:stage": "127.0.0.1:7001"
+    }
+  },
+  "traceparent": {
+    "format": "00-<32hex>-<16hex>-01",
+    "known": {
+      "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+      "traceId": "0123456789abcdef0123456789abcdef"
+    }
+  },
+  "envelope": {
+    "mark": "__troupe_envelope__",
+    "version": 1,
+    "wrapped": {
+      "__troupe_envelope__": 1,
+      "props": {
+        "a": 1
+      },
+      "idem": {
+        "k1": {
+          "fp": "fp-hash",
+          "ok": true,
+          "value": 42,
+          "exp": 12345
+        }
+      }
+    }
+  },
+  "wireErr": {
+    "conflict": {
+      "kind": "conflict",
+      "name": "ConflictError",
+      "message": "CAS 冲突：期望 revision=1，实际 revision=2"
+    },
+    "rejected": {
+      "kind": "rejected",
+      "name": "CallRejectedError",
+      "message": "白名单外方法",
+      "reason": "whitelist",
+      "retryable": false
+    },
+    "business": {
+      "kind": "business",
+      "name": "Error",
+      "message": "boom"
+    }
+  }
+}

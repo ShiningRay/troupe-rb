@@ -79,6 +79,17 @@ module Troupe
       true
     end
 
+    # 协作取消控制帧（Issue #7，advisory）：单向发送，不等响应——
+    # 不保证到达；发送失败只记日志（调用方仍在处理自己的结果未知）
+    def cancel(owner_addr, call_id)
+      conn = conn_for(owner_addr)
+      conn.notify("t" => "cancel", "callId" => call_id)
+      true
+    rescue StandardError => e
+      Log.debug("cancel 帧发送失败（advisory）：#{e.class}: #{e.message}")
+      false
+    end
+
     # 返回对端 summary（reader 已合并进本地 roster）
     def sync(addr, summary, timeout: 2.0)
       conn = conn_for(addr)
@@ -153,34 +164,80 @@ module Troupe
     end
 
     def call_to_wire(call)
-      {
+      frame = {
         "v" => PROTOCOL_VERSION, "callId" => call.call_id,
         "ns" => call.namespace,
         "to" => { "role" => call.role_id, "stageName" => call.stage_name },
         "method" => call.method.to_s, "args" => call.args,
         "deadline" => call.deadline_ms, "hop" => call.hop
       }
+      frame["traceparent"] = call.traceparent if call.traceparent # §11.4 跨 Stage 传播
+      frame["cancellable"] = true if call.cancellable? # Issue #7：跨 Stage 取消投递
+      frame
     end
 
     def wire_to_call(c)
       to = c["to"] || {}
-      Call.new(
+      call = Call.new(
         namespace: c["ns"].to_s, role_id: to["role"].to_s, stage_name: to["stageName"].to_s,
         method: c["method"].to_s, args: c["args"].is_a?(Array) ? c["args"] : [],
         deadline_ms: c["deadline"] ? Integer(c["deadline"]) : nil,
-        source: :remote, call_id: c["callId"], hop: Integer(c["hop"] || 0)
+        source: :remote, call_id: c["callId"], hop: Integer(c["hop"] || 0),
+        cancellable: c["cancellable"] == true
       )
+      call.traceparent = c["traceparent"].to_s if c["traceparent"]
+      call
     end
 
+    # 错误解码：优先 cr code 表（{"code": ...}），兼容 js v2 形状（kind/name/reason/phase）。
+    # 栈（backtrace）永不跨线（M1 错误映射）。
     def wire_error(err)
-      name = err.is_a?(Hash) ? err["name"].to_s : ""
-      message = err.is_a?(Hash) ? err["message"].to_s : "未知错误"
-      kind = err.is_a?(Hash) ? err["kind"].to_s : "internal"
+      err ||= {}
+      name = err["name"].to_s
+      message = err["message"].to_s
+      kind = err["kind"].to_s
+      reason = err["reason"].to_s
+      phase = err["phase"].to_s
+      attach = ->(e) { e.tap { |x| x.phase = phase if x.respond_to?(:phase=) && !phase.empty? } }
+
+      case err["code"]
+      when "CONFLICT" then ConflictError.new(message)
+      when "CALL_TIMEOUT" then attach.call(CallTimeoutError.new(message, phase: phase_to_sym(phase)))
+      when "CALL_REJECTED" then CallRejectedError.new(message, reason.empty? ? nil : reason)
+      when "UNKNOWN_OUTCOME" then decode_unknown(name, message)
+      when "IDEMPOTENCY_CONFLICT" then IdempotencyConflictError.new(message)
+      when "UNKNOWN_ROLE" then UnknownRoleError.new(message)
+      when "INVALID_ARGUMENT" then SerializationError.new(message)
+      when "INVALID_ACTOR_STATE" then InvalidActorStateError.new(message)
+      when "ACTIVATION" then decode_activation(name, message)
+      when "PROTOCOL" then ProtocolError.new(message)
+      else
+        decode_legacy(kind, name, message, reason, phase)
+      end
+    end
+
+    def phase_to_sym(phase)
+      phase == "queued" ? :queued : (:executing if phase == "executing")
+    end
+
+    def decode_unknown(name, message)
+      name == "CallTimeoutError" ? CallTimeoutError.new(message) : ConnectionLostError.new(message)
+    end
+
+    def decode_activation(name, message)
+      case name
+      when "MigrationError" then MigrationError.new(message)
+      when "OwnershipError" then OwnershipError.new(message)
+      else ActivationError.new(message)
+      end
+    end
+
+    # js v2 / 旧 trouperb 形状：kind + name（+reason/phase）
+    def decode_legacy(kind, name, message, reason, phase)
       case kind
       when "business" then RemoteError.new(name, message)
       when "conflict" then ConflictError.new(message)
-      when "unknown"
-        name == "CallTimeoutError" ? CallTimeoutError.new(message) : ConnectionLostError.new(message)
+      when "unknown" then decode_unknown(name, message)
       else
         klass = name.empty? ? nil : begin
           k = ::Troupe.const_get(name) # 顶层限定：模块内 Troupe 会被词法解析为 Troupe::Troupe
@@ -188,7 +245,9 @@ module Troupe
         rescue NameError
           nil
         end
-        (klass || CallRejectedError).new(message)
+        e = (klass || CallRejectedError).new(message, reason.empty? ? nil : reason)
+        e.phase = phase.to_sym if e.respond_to?(:phase=) && !phase.empty?
+        e
       end
     end
 
@@ -229,6 +288,22 @@ module Troupe
       rescue StandardError
         "unknown"
       end
+      # 版本协商（M1）：首帧必须是 hello，携带 protocolVersion；不匹配显式拒绝并关连接。
+      # 旧版本节点（无 hello）连入同样被显式拒绝——mixed-version 不静默混跑（学 js）。
+      hello = read_frame(sock)
+      unless hello.is_a?(Hash) && hello["t"] == "hello"
+        raise ProtocolError, "首帧必须是 hello（协议版本协商）：收到 #{hello.is_a?(Hash) ? hello['t'].inspect : hello.class}"
+      end
+
+      check_cluster_token!(hello)
+      peer_v = hello["v"]
+      if peer_v != PROTOCOL_VERSION
+        write_frame(sock, { "t" => "hello", "id" => hello["id"], "ok" => false, "v" => PROTOCOL_VERSION,
+                            "error" => "协议版本不匹配：本端 v#{PROTOCOL_VERSION}，对端 v#{peer_v.inspect}" })
+        raise ProtocolError, "协议版本不匹配：本端 v#{PROTOCOL_VERSION}，对端 v#{peer_v.inspect}（显式拒绝，不混跑）"
+      end
+      write_frame(sock, { "t" => "hello", "id" => hello["id"], "ok" => true, "v" => PROTOCOL_VERSION })
+
       loopback = %w[127.0.0.1 ::1 localhost].include?(peer_ip)
       conn = ServerConn.new(self, sock, peer_ip, loopback)
       loop do
@@ -259,6 +334,11 @@ module Troupe
       when "call"
         handle_call(conn, frame)
         true
+      when "cancel"
+        # 协作取消控制帧（Issue #7，advisory）：按 callId 定位在飞/排队 Call；
+        # 非 call 帧，不进白名单路径；cluster token 校验已覆盖信任边界
+        @troupe.stage_manager.cancel_by_call_id(frame["callId"].to_s)
+        true
       when "ping"
         conn.reply("t" => "ack", "id" => frame["id"], "incarnation" => @troupe.incarnation)
         true
@@ -269,7 +349,7 @@ module Troupe
       when "sub"
         handle_subscribe(conn, frame)
         true
-      when "resp", "trace", "ack"
+      when "resp", "trace", "ack", "hello"
         true # 客户端方向的帧出现在服务端：忽略
       else
         raise ProtocolError, "未知帧类型 #{frame['t'].inspect}"
@@ -306,7 +386,7 @@ module Troupe
           conn.reply("t" => "resp", "callId" => c["callId"], "ok" => true, "result" => result)
         rescue TroupeError => e
           conn.reply("t" => "resp", "callId" => c["callId"], "ok" => false,
-                     "error" => { "kind" => e.kind.to_s, "name" => error_name(e), "message" => e.message.to_s })
+                     "error" => Errors.wire_payload(e, error_name(e)))
         end)
         return
       end
@@ -318,7 +398,7 @@ module Troupe
         conn.reply("t" => "resp", "callId" => call.call_id, "ok" => true, "result" => value)
       rescue TroupeError => e
         conn.reply("t" => "resp", "callId" => call.call_id, "ok" => false,
-                   "error" => { "kind" => e.kind.to_s, "name" => error_name(e), "message" => e.message.to_s })
+                   "error" => Errors.wire_payload(e, error_name(e)))
       rescue StandardError => e
         conn.reply("t" => "resp", "callId" => call.call_id, "ok" => false,
                    "error" => { "kind" => "business", "name" => e.class.name.to_s, "message" => e.message.to_s })
@@ -333,7 +413,7 @@ module Troupe
 
     def error_resp(frame, e)
       { "t" => "resp", "callId" => (frame["call"].is_a?(Hash) ? frame["call"]["callId"] : nil), "ok" => false,
-        "error" => { "kind" => e.kind.to_s, "name" => error_name(e), "message" => e.message.to_s } }
+        "error" => Errors.wire_payload(e, error_name(e)) }
     end
 
     def handle_subscribe(conn, frame)
@@ -383,6 +463,8 @@ module Troupe
 
   # ---- 客户端连接（按需建立、断线重连懒初始化） ----
   class ClientConn
+    HELLO_TIMEOUT_S = 5.0
+
     attr_accessor :on_trace
 
     def initialize(transport, host, port)
@@ -406,6 +488,7 @@ module Troupe
         end
         read_loop
       end
+      negotiate!
     end
 
     def closed?
@@ -425,6 +508,8 @@ module Troupe
               box.settle_error(@transport.wire_error(frame["error"]))
             end
           end
+        when "hello"
+          settle_by_id(frame["id"], frame) # 版本协商响应
         when "trace"
           @on_trace&.call(frame["event"])
         when "sync"
@@ -447,7 +532,7 @@ module Troupe
       box&.settle_ok(frame)
     end
 
-    # 通用请求-响应（ping / sync / sub）
+    # 通用请求-响应（hello / ping / sync / sub）
     def request(frame, timeout)
       id = Util.call_id
       box = ResponseBox.new
@@ -460,6 +545,25 @@ module Troupe
         raise ConnectionLostError, "#{@addr} 发送失败：#{e.message}（结果未知）"
       end
       box.wait!(Util.now_ms + (timeout * 1000).to_i)
+    end
+
+    # 单向通知帧（cancel，advisory）：不等响应、不占 pending
+    def notify(frame)
+      @wm.synchronize { @transport.write_frame(@sock, frame.merge("token" => token)) }
+      nil
+    end
+
+    # 版本协商（M1）：连接后首帧 hello，携带 protocolVersion；不匹配显式拒绝
+    def negotiate!
+      hello = request({ "t" => "hello", "v" => PROTOCOL_VERSION }, HELLO_TIMEOUT_S)
+      unless hello["ok"] && hello["v"] == PROTOCOL_VERSION
+        raise ProtocolError,
+              "协议版本不匹配：本端 v#{PROTOCOL_VERSION}，对端 #{hello['v'].inspect}（#{hello['error']}）"
+      end
+    rescue ConnectionLostError => e
+      raise ProtocolError, "版本协商失败：#{e.message}（对端可能为不支持 hello 的旧版本节点）"
+    rescue CallTimeoutError
+      raise ProtocolError, "版本协商超时（对端未响应 hello）"
     end
 
     def call_remote(call)

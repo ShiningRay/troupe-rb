@@ -81,7 +81,10 @@ ruby bin/troupe --to 127.0.0.1:7301 ps     # 在场演员（跨 Stage 聚合）
 | 幂等恢复 | 同 requestId 同参数重放原结果；同键不同参数拒绝 | `examples/drop_shop` |
 | 结果未知 ≠ 失败 | 超时/断连只代表结果未知；框架不自动重试 | `test_remote_deadline…` |
 | 所有权 fencing | 接管后 epoch 单调递增，旧实例写入被存储拒绝 | `test_takeover_rejects_old_owner…`、`test_stage_death_failover…` |
-| 持久提醒 | 下场后仍触发并重新登台；租约到期重投（至少一次） | `test/cue_test.rb` |
+| 持久提醒 | 下场后仍触发并重新登台；租约到期重投（至少一次）；Cue 投递走有界工作池（8 worker + 256 深度背压） | `test/cue_test.rb` |
+| 协作取消（advisory） | 调用方放弃等待后通知目标早停：排队阶段整体拒绝（无副作用）、执行阶段 `cancelled?` 检查点自愿退出 + `on_cancel` 钩子；取消不伪造失败（结果未知 ≠ 失败）；仅 `cancellable` 标注方法，其余行为不变 | `test/cancel_test.rb` |
+| 传输版本协商 | 连接首帧 hello 携带 protocolVersion，不匹配显式拒绝（不混跑） | `test_version_mismatch_hello_rejected` |
+| golden 协议锚点 | xxh32/哈希环分配/traceparent/存储信封/wire 错误形状与 troupejs 同一 fixtures | `test/golden_test.rb` |
 | 信任边界 | 生命周期钩子/基类成员不可经 RPC；畸形帧可控拒绝 | `test_whitelist_enforced_on_wire`、`test_malformed_frame…` |
 
 运行全部测试（Ruby ≥ 3.2；CI 矩阵 3.2/3.3/3.4/4.0 × ubuntu/windows）：
@@ -119,7 +122,7 @@ bundle exec rake test
 
 ## 实现范围（对照 Troupe.js PLAN）
 
-已实现：**M1** 严格串行运行时 + PropStore 合同（CAS/迁移/校验）；**M2** 本地持久化（PStore）+ TCP 集群（长度前缀 JSON、白名单、背压、畸形帧防护）+ HashRing（纯 Ruby xxh32，160 vnodes）+ 误投转发；**M3** 所有权（租约 + 单调 epoch + fencing）+ Roster（gossip 反熵 + ping/ACK 探测 + 终态不可复活）；**M4** 持久 Cue（CueStore + claim/lease/statusVersion CAS + cron）+ Director/CLI；**M5** 交错执行（组合矩阵 + 写饥饿防护）；**M6** Trace 总线（环形缓冲 + 采样 + 订阅）；**M7** Show（进程内 pub/sub）。
+已实现：**M1** 严格串行运行时 + PropStore 合同（CAS/迁移/校验）；**M2** 本地持久化（PStore）+ TCP 集群（长度前缀 JSON、白名单、背压、畸形帧防护）+ HashRing（纯 Ruby xxh32，160 vnodes）+ 误投转发；**M3** 所有权（租约 + 单调 epoch + fencing）+ Roster（gossip 反熵 + ping/ACK 探测 + 终态不可复活）；**M4** 持久 Cue（CueStore + claim/lease/statusVersion CAS + cron）+ Director/CLI；**M5** 交错执行（组合矩阵 + 写饥饿防护）；**M6** Trace 总线（环形缓冲 + 采样 + 订阅）；**M7** Show（进程内 pub/sub）；**M8（ROADMAP M1）** 语义对齐——协作取消（#7 advisory）、排队/执行超时 phase 分离、错误分类 code 映射（对齐 troupe.cr golden/errors.json）、golden fixtures（xxh32/环/traceparent/信封/wireErr）、传输 hello 版本协商（协议 v2）、存储信封（Props 与幂等记录同行原子落盘）、traceparent 随线路传播、全局背压预算 spec。
 
 路线图（见 [DESIGN_NOTES.md](DESIGN_NOTES.md)）：Postgres 共享 PropStore、BoxOffice、Booth、热重载/热替换（Ruby 无 `setPrototypeOf`，L1/L2 需另设计）、Show 跨节点转发、Extra。
 
@@ -130,4 +133,5 @@ bundle exec rake test
 - **单个热点 Actor 只有一个串行通道**：加 Stage 只能分摊不同 Actor 的负载（容量事实，DESIGN §5.3）
 - **每在场 Actor 一个调度线程**：Ruby 线程成本高于 JS Promise，高 churn 场景建议调低 Intermission 或提高 `activation_limit` 前评估内存
 - **PStore/SQLite 均为进程级持久**：多节点生产的共享 PropStore（Postgres）未实现前，集群故障恢复仅在共享内存 Store（同进程多 Stage）或同机单进程内成立
+- **存储信封（M1）**：PropStore 记录的 props 字段为 `{__troupe_envelope__: 1, props, idem}`；旧数据（裸 Props）可直接读取，但新数据被旧版本 trouperb 读取会把信封键当作业务 Props——PStore 为开发级存储，跨版本升级请先排空
 - 本地调用默认走同一 JSON 编解码边界：Hash 键归一为字符串、Symbol → String、Time → ISO 8601；`local_call_by_reference: true` 可显式关闭复制换性能（语义分叉自担）

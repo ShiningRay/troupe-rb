@@ -26,15 +26,15 @@
 
 ## M1 语义对齐（与 js/cr 共同契约）
 
-- [ ] [#7](https://github.com/ShiningRay/troupe/issues/7)：协作取消——排队阶段拒绝、执行阶段自愿；wire 增加 `cancel` 消息；保持「结果未知 ≠ 失败」。
-- [ ] deadline/UnknownOutcome 语义矩阵：排队过期 vs 执行超时分离（js 的「响应期限与执行占用分离」、cr 的 queued/executing 两类超时）。
-- [ ] 错误分类 wire 映射表（对齐 cr `golden/errors.json` 的 code 表）：业务/拒绝/未知结果/冲突/幂等冲突可区分，栈不跨线。
-- [ ] 引入 golden fixtures：先采纳 troupejs `protocol-v2.json` 向量（xxh32/环分配/traceparent/envelope/wireErr）；canonical hash 分叉上报 troupe-planning 出 ADR，不单方面改算法。
-- [ ] 传输版本协商：首帧携带 protocolVersion，不匹配显式拒绝（学 cr ADR-0001 的 ack 缺口教训、js 的 mixed-version 拒绝）。
-- [ ] 全局背压预算：远程转发/Actor 互调/慢 Turn/长 Cue 的有界队列与过载拒绝（CallRejected(backpressure)）。
-- [ ] 调度矩阵 spec：串行 × read_only × improv × 超时 × 取消的组合可验证；明确 MRI 抢占点与 JS await 点语义不同，不宣称等价。
+- [x] [#7](https://github.com/ShiningRay/troupe/issues/7)：协作取消——排队阶段拒绝（CallCancelledError，无副作用）、执行阶段自愿（`cancelled?` 检查点 + `on_cancel` 钩子）；wire 增加 `cancel` 控制帧（`cancellable` 标志随 call 帧传播）；保持「结果未知 ≠ 失败」；非 cancellable 方法行为回归锁死。
+- [x] deadline/UnknownOutcome 语义矩阵：`CallTimeoutError#phase` 分离 queued（排队过期=确定性拒绝）/executing（执行超时=结果未知）；deliver 入队过期确定性短路。
+- [x] 错误分类 wire 映射表（对齐 cr `golden/errors.json` 的 code 表）：`Errors::WIRE_CODES` + reason/retryable/phase；出站形状保持 js v2（golden 深比较锚定），入站兼容 cr `{"code":...}`；栈不跨线。
+- [x] 引入 golden fixtures：采纳 troupejs `protocol-v2.json` 向量（xxh32/环分配/traceparent/envelope/wireErr 九项锚定测试全绿）；canonical hash 分叉上报 troupe-planning 出 ADR，不单方面改算法。
+- [x] 传输版本协商：首帧 hello 携带 protocolVersion（v2 对齐 fixtures），不匹配显式拒绝；非 hello 首帧（旧版本节点）同样显式拒绝。
+- [x] 全局背压预算：远程转发（WorkerPool 有界）/Actor 互调（board+bytes 预算）/慢 Turn（无队列增长）/长 Cue（M0 有界池）；字节预算超限反例测试 + reason=backpressure；drain 重投复用 improv 池不再新建线程。
+- [x] 调度矩阵 spec：串行 × read_only × improv × 超时（queued/executing phase）× 取消的组合可验证（improv_test 矩阵 + cancel_test + runtime phase 断言）；明确 MRI 抢占点与 JS await 点语义不同，不宣称等价。
 
-**门禁**：golden 全绿；调度矩阵与取消/超时反例测试全绿。
+**门禁**：golden 全绿；调度矩阵与取消/超时反例测试全绿。（本地 116 runs 全绿；CI 以 Actions 实跑为准）
 
 ## M2 生产共享状态与真实故障接管（#5 核心）
 

@@ -117,6 +117,43 @@ class ClusterTest < Minitest::Test
     assert_equal 1, a.add(1)
   end
 
+  # 版本协商（M1）：首帧必须 hello；非 hello 首帧显式拒绝
+  def test_non_hello_first_frame_explicitly_rejected
+    t1 = form_troupe
+    host, port = t1.advertise.split(":")
+    tr = Troupe::Transport.new(nil)
+
+    # 合法 JSON 但不是 hello 的首帧（旧版本 trouperb 的 call 帧形态）→ 拒绝并关连接
+    sock = TCPSocket.new(host, Integer(port, 10))
+    frame = JSON.generate({ "t" => "call", "call" => { "callId" => "x", "method" => "add" } })
+    sock.write([frame.bytesize].pack("V") + frame)
+    sleep 0.1
+    assert_raises(EOFError, IOError, Troupe::ProtocolError) { tr.send(:read_frame, sock) }
+    sock.close
+
+    # Stage 存活，正常调用不受影响
+    a = t1.cast(WorkerActor, "version-ok")
+    assert_equal 1, a.add(1)
+  end
+
+  # 版本协商（M1）：hello 携带不匹配的 protocolVersion → 显式 ok:false + 关连接
+  def test_version_mismatch_hello_rejected
+    t1 = form_troupe
+    host, port = t1.advertise.split(":")
+    tr = Troupe::Transport.new(nil)
+
+    sock = TCPSocket.new(host, Integer(port, 10))
+    hello = JSON.generate({ "t" => "hello", "v" => Troupe::PROTOCOL_VERSION + 99 })
+    sock.write([hello.bytesize].pack("V") + hello)
+    resp = tr.send(:read_frame, sock)
+    assert_equal false, resp["ok"], "版本不匹配显式拒绝（不混跑）"
+    assert_equal Troupe::PROTOCOL_VERSION, resp["v"], "响应携带本端版本"
+    assert_match(/版本不匹配/, resp["error"])
+    sleep 0.1
+    assert_raises(EOFError, IOError) { tr.send(:read_frame, sock) } # 随后关连接
+    sock.close
+  end
+
   # M3 验收：kill -9 一个 Stage，Actor 在存活 Stage 以完整 Props 重新登台（共享存储）
   def test_stage_death_failover_with_shared_store_and_fencing
     store = Troupe::MemoryPropStore.new(ownership: true)

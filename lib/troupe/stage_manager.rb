@@ -27,10 +27,11 @@ module Troupe
     # 持久成功（DESIGN §7.3）：CAS 提交（业务变更）成功后才返回。
     # 返回新 revision（可序列化标量——用户方法常以 save_props 结尾，返回值会过边界）。
     # 失败/冲突 → 默认实例失效（poison），下次调用从最后已提交快照继续。
+    # 存储形态为信封（Envelope.wrap）：用户 Props 与幂等记录同一行原子落盘（对齐 troupejs R6）。
     def save_props
       stored = @troupe.prop_store.write(
         @cell.namespace, @cell.role_id, @cell.stage_name,
-        Codec.copy(@props),
+        Envelope.wrap(Codec.copy(@props), @cell.idem),
         expected_revision: @cell.revision,
         schema_version: @cell.role_class.schema_version,
         fencing_token: @cell.fencing_token
@@ -40,6 +41,12 @@ module Troupe
     rescue ConflictError
       @cell.poison!
       raise
+    end
+
+    # 协作取消检查点（Issue #7，advisory）：cancellable Turn 执行期间可轮询；
+    # 取消是建议——早停后的副作用仍按原契约提交（save_props 照常）
+    def cancelled?
+      cell.current_cancel_state&.cancelled? || false
     end
 
     def register_cue(name, every, blk)
@@ -141,7 +148,7 @@ module Troupe
   #
   # 调度模型（config.dispatcher）：
   #   * :thread_per_cell（默认）——Cell 首次接单时 spawn 专属调度线程；
-  #   * :shared——SharedDispatcherPool 的 M 条线程多路复用全部 Cell（见 dispatcher_pool.rb）。
+  #   * :shared——SharedDispatcherPool 的 M 条线程多路复用 Cell（见 dispatcher_pool.rb）。
   #
   # @cells 访问采用锁分段（借鉴 concurrent-ruby Concurrent::Map 的 striped lock 设计）：
   # 每 key 哈希到 16 段之一，派发热路径只取一段锁；全量快照/停机按段序依次取锁。
@@ -177,6 +184,24 @@ module Troupe
       @stripes[key.hash % STRIPES]
     end
 
+    # 协作取消入口（Issue #7）：
+    #  * 本地调用方超时/显式取消 → 按 (role, stageName) 定位 Cell；
+    #  * 远端 cancel 控制帧 → cancel_by_call_id 全 Cell 扫描。
+    # advisory：找不到目标 Call（已完成/未携 cancel 状态）为正常情况，返回 nil。
+    def cancel_call(role_id, stage_name, call_id)
+      key = [config.namespace, role_id, stage_name]
+      cell = stripe_for(key).synchronize { @cells[key] }
+      cell&.cancel_call(call_id)
+    end
+
+    def cancel_by_call_id(call_id)
+      cells_snapshot.each do |c|
+        res = c.cancel_call(call_id)
+        return res if res
+      end
+      nil
+    end
+
     def repertoire
       @troupe.repertoire
     end
@@ -196,6 +221,11 @@ module Troupe
         call.args = Codec.copy(call.args)
       end
       resolve_cell(klass, call)
+      # 排队过期（M1 语义矩阵）：入队时 deadline 已过的 Call 确定性拒绝（phase=queued），
+      # 不等 box——调度线程也会以同一语义 settle（幂等）；执行不可能已开始
+      if call.expired?
+        raise CallTimeoutError.new("排队已过期：未开始执行、无副作用，已拒绝（DESIGN §5.1）", phase: :queued)
+      end
       # 执行结果与指标由 run_turn / settle_expired! 统一记录
       call.box.wait!(call.deadline_ms)
     rescue StandardError => e
@@ -409,7 +439,7 @@ module Troupe
   # 严格串行 = 调度线程逐条执行；响应期限与执行占用分离 = 等待超时不中断执行线程。
   # dispatcher: :shared 时改由共享调度池多路复用（严格串行由 enqueued 令牌保证）。
   class Cell
-    attr_reader :troupe, :role_class, :namespace, :role_id, :stage_name, :state
+    attr_reader :troupe, :role_class, :namespace, :role_id, :stage_name, :state, :idem
     attr_accessor :revision, :fencing_token
 
     def initialize(manager, role_class, namespace, role_id, stage_name)
@@ -443,6 +473,10 @@ module Troupe
       @poisoned = false
       @cues = {}
       @cue_lock = Mutex.new
+      # 协作取消（Issue #7）：当前执行中的 Call（供 cancelled? 检查点与 cancel 帧定位）
+      @current_call = nil
+      # 幂等记录（信封随 Props 原子落盘；框架级重放在 M2/M4 接线，先保形状）
+      @idem = {}
       # 共享调度：Cell 持有 enqueued 令牌 = 已在共享池就绪队列中（防重复入队/并发处理）
       @shared_dispatcher = manager.shared_dispatcher
       @enqueued = false
@@ -736,13 +770,42 @@ module Troupe
     def settle_expired!(call)
       return false unless call.expired?
 
-      call.box.settle_error(CallTimeoutError.new("排队已过期：未开始执行、无副作用，已拒绝（DESIGN §5.1）"))
+      # phase :queued —— 与 :executing 分离（M1 语义矩阵）：排队过期 = 未开始、
+      # 无副作用的确定性拒绝；执行超时才是结果未知
+      call.box.settle_error(CallTimeoutError.new("排队已过期：未开始执行、无副作用，已拒绝（DESIGN §5.1）", phase: :queued))
       @role_metrics.observe(:rejected, 0.0)
       true
     end
 
     def running?
       @lock.synchronize { @state } == :running
+    end
+
+    # ---- 协作取消（Issue #7，advisory） ----
+
+    # 当前 Turn 的取消状态（ActorContext#cancelled? 检查点用）
+    def current_cancel_state
+      @turn_lock.synchronize { @current_call&.cancel_state }
+    end
+
+    # 取消定位：先查在飞（执行中 → 协作式信号），再查排队（摘除 → 拒绝 settle）。
+    # 非 cancellable Call 不受影响（Issue #7 回归锁：行为与旧版本完全一致）。
+    # 返回 :executing / :queued / nil（advisory：找不到 = 已完成或本 Cell 无此 Call）
+    def cancel_call(call_id)
+      current = @turn_lock.synchronize { @current_call }
+      if current&.call_id == call_id
+        return nil unless current.cancel_state # 非 cancellable：无取消状态，行为不变
+
+        current.cancel_state.cancel!
+        return :executing
+      end
+
+      call = @board.cancel!(call_id) # 仅摘除 cancellable 的排队 Call
+      return nil unless call
+
+      call.box.settle_error(CallCancelledError.new("已取消：排队阶段（未开始执行、无副作用）"))
+      @role_metrics.observe(:rejected, 0.0)
+      :queued
     end
 
     # ---- 激活（single-flight：队列语义天然保证只激活一次，DESIGN §5.2） ----
@@ -761,20 +824,24 @@ module Troupe
 
       stored = store.read(@namespace, @role_id, @stage_name)
       if stored
-        props = Codec.copy(stored.props) # 已提交快照（同一编解码边界）
+        unwrapped = Envelope.unwrap(stored.props) # 信封（用户 Props + 幂等记录同行情）
+        @idem = Envelope.prune_idem(unwrapped[:idem], Util.now_ms)
+        props = Codec.copy(unwrapped[:props]) # 已提交快照（同一编解码边界）
         if stored.schema_version < klass.schema_version
           props = run_migration(klass, store, props, stored)
         end
       else
         props = klass.build_initial_props
         begin
-          stored = store.create(@namespace, @role_id, @stage_name, Codec.copy(props),
+          stored = store.create(@namespace, @role_id, @stage_name, Envelope.wrap(Codec.copy(props), @idem),
                                 schema_version: klass.schema_version, fencing_token: @fencing_token)
         rescue ConflictError
           # 创建竞态（跨 Stage 抢激活）：以已存在记录为准
           stored = store.read(@namespace, @role_id, @stage_name) ||
                    raise(ActivationError, "#{label} Props 创建竞态且读取失败")
-          props = Codec.copy(stored.props)
+          unwrapped = Envelope.unwrap(stored.props)
+          @idem = Envelope.prune_idem(unwrapped[:idem], Util.now_ms)
+          props = Codec.copy(unwrapped[:props])
         end
       end
 
@@ -844,7 +911,7 @@ module Troupe
       end
       migrated = Codec.copy(migrated)
       begin
-        store.write(@namespace, @role_id, @stage_name, migrated,
+        store.write(@namespace, @role_id, @stage_name, Envelope.wrap(migrated, @idem),
                     expected_revision: stored.revision, schema_version: target,
                     fencing_token: @fencing_token)
       rescue ConflictError
@@ -875,7 +942,7 @@ module Troupe
       @turn_lock.synchronize do
         while @annotated.positive?
           if call.expired?
-            call.box.settle_error(CallTimeoutError.new("等待交错在飞请求结束超时：结果未知（DESIGN §5.4）"))
+            call.box.settle_error(CallTimeoutError.new("等待交错在飞请求结束超时：未开始执行（DESIGN §5.4）", phase: :queued))
             @role_metrics.observe(:rejected, 0.0)
             return
           end
@@ -885,7 +952,10 @@ module Troupe
     end
 
     def run_turn(call, annotated:)
-      @turn_lock.synchronize { @in_flight += 1 }
+      @turn_lock.synchronize do
+        @in_flight += 1
+        @current_call = call
+      end
       t0 = Util.mono
       err = nil
       result = nil
@@ -917,8 +987,25 @@ module Troupe
         {
           "at" => Util.now_ms, "stage" => @troupe.advertise, "from" => (call.from_stage || call.source.to_s),
           "role" => @role_id, "stageName" => @stage_name, "method" => (call.block? ? "cue:#{call.method}" : call.method.to_s),
-          "durationMs" => (dur * 1000).round(3), "outcome" => outcome.to_s, "callId" => call.call_id
-        }
+          "durationMs" => (dur * 1000).round(3), "outcome" => outcome.to_s, "callId" => call.call_id,
+          "traceparent" => call.traceparent
+        }.compact
+      end
+      invoke_on_cancel_if_signalled(call)
+      @turn_lock.synchronize { @current_call = nil if @current_call&.equal?(call) }
+      nil
+    end
+
+    # 取消通知（advisory）：本 Turn 执行期间收到 cancel → on_cancel 钩子在
+    # 同一执行线程、Turn settle 之后调用（strict 仍在串行通道上，improv 在自身
+    # Turn 线程上）——清理副作用但不回滚已提交状态。
+    def invoke_on_cancel_if_signalled(call)
+      return unless call.cancel_state&.cancelled? && @actor
+
+      begin
+        @actor.on_cancel
+      rescue StandardError => e
+        Log.warn("#{label} on_cancel 钩子抛错：#{e.class}: #{e.message}")
       end
     end
 
@@ -982,7 +1069,9 @@ module Troupe
 
     def re_dispatch(queued)
       queued.each do |call|
-        Thread.new do
+        # 有界复用（M1 背压预算）：不再每条排队 Call 新建线程；
+        # offer 侧的 board/bytes/activation 预算照常生效，过载显式拒绝
+        @manager.troupe.improv_pool.perform do
           begin
             @manager.deliver(call)
           rescue StandardError => e

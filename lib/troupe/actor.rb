@@ -78,6 +78,18 @@ module Troupe
         annotate(:read_only, methods)
       end
 
+      # 协作取消标注（Issue #7）：仅这些方法投递取消通知——
+      # 排队阶段整体拒绝；执行阶段 Actor 在检查点用 context.cancelled? 自愿早停。
+      # 未标注的方法收到 cancel 帧行为与旧版本完全一致（回归测试锁死）。
+      def cancellable(*methods)
+        methods.each { |m| (@cancellable_methods ||= []) << m.to_sym }
+        nil
+      end
+
+      def cancellable?(method)
+        (@cancellable_methods || []).include?(method.to_sym)
+      end
+
       # :strict（独占）或 :annotated（可交错；标注种类 improv/read_only 都算 annotated）
       def call_kind(method)
         (@annotations || {}).key?(method.to_sym) ? :annotated : :strict
@@ -149,6 +161,13 @@ module Troupe
       @props = context.props
     end
 
+    # 协作取消检查点（Issue #7，advisory）：cancellable 标注的方法在执行期间轮询；
+    # 取消是建议——早停后的副作用仍按原契约提交（save_props 照常），调用方只看到
+    # 自己的超时（结果未知 ≠ 失败）。普通方法恒 false，行为与旧版本一致。
+    def cancelled?
+      @context.cancelled?
+    end
+
     def stage_name
       @context.stage_name
     end
@@ -200,6 +219,10 @@ module Troupe
     def on_cue(name, payload)
       Log.warn("#{self.class.name} 收到未处理的提醒 #{name.inspect}")
     end
+
+    # 协作取消钩子（Issue #7，advisory）：cancellable Turn 执行期间收到取消时，
+    # 在同一执行线程、Turn settle 之后调用（串行不破坏）；副作用仍按原契约提交。
+    def on_cancel; end
 
     # 结构迁移（DESIGN §7.4）：stored.schema_version < 类版本时，框架逐级
     # （v → v+1）调用本方法，from_version 即当前步的源版本；跨多版本时每一步

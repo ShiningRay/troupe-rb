@@ -9,11 +9,12 @@ module Troupe
   class Call
     attr_reader :call_id, :namespace, :role_id, :stage_name, :method, :deadline_ms, :source, :call_kind
     attr_writer :args, :hop
-    attr_accessor :from_stage, :box
+    attr_accessor :from_stage, :box, :traceparent
 
     # source: :local | :remote | :cue | :reminder | :admin | :forward
     def initialize(namespace:, role_id:, stage_name:, method:, args:, deadline_ms:,
-                   source: :local, call_id: nil, block: nil, internal: false, hop: 0)
+                   source: :local, call_id: nil, block: nil, internal: false, hop: 0,
+                   cancellable: false)
       @call_id = call_id || Util.call_id
       @namespace = namespace
       @role_id = role_id
@@ -27,10 +28,23 @@ module Troupe
       @internal = internal
       @hop = hop
       @box = ResponseBox.new
+      # 协作取消（Issue #7，advisory）：仅 cancellable 标注的方法携带取消状态；
+      # 普通方法 cancel_state 为 nil，收到 cancel 帧行为与旧版本完全一致
+      @cancellable = cancellable
+      @cancel_state = cancellable ? CancelState.new : nil
+      @traceparent = nil
     end
 
     def internal?
       @internal
+    end
+
+    def cancellable?
+      @cancellable
+    end
+
+    def cancel_state
+      @cancel_state
     end
 
     def block?
@@ -82,6 +96,25 @@ module Troupe
     end
   end
 
+  # 协作取消状态（Issue #7，advisory）：取消是"建议"而非"回滚"——
+  # 已产生的副作用仍按原契约提交；不向调用方伪造失败（结果未知 ≠ 失败）。
+  # 不做抢占式中断（Thread#raise 会破坏 Props 一致性与 fencing，明确不用）。
+  class CancelState
+    def initialize
+      @mutex = Mutex.new
+      @cancelled = false
+    end
+
+    def cancelled?
+      @mutex.synchronize { @cancelled }
+    end
+
+    def cancel!
+      @mutex.synchronize { @cancelled = true }
+      nil
+    end
+  end
+
   # 响应盒：调用方等待执行方 settle。等待超时只放弃等待——
   # 执行占用保持到原执行结束（响应期限与执行占用分离，DESIGN §5.1）。
   class ResponseBox
@@ -110,12 +143,14 @@ module Troupe
           when :ok then return @payload
           when :error then raise @payload
           end
-          if deadline_ms
-            remaining = (deadline_ms - Util.now_ms) / 1000.0
-            if remaining <= 0
-              raise CallTimeoutError,
-                    "Call 超过响应期限：结果未知——不等于失败；按幂等键重试而非假定失败（DESIGN §5.1/§6.5）"
-            end
+            if deadline_ms
+              remaining = (deadline_ms - Util.now_ms) / 1000.0
+              if remaining <= 0
+                raise CallTimeoutError.new(
+                  "Call 超过响应期限：结果未知——不等于失败；按幂等键重试而非假定失败（DESIGN §5.1/§6.5）",
+                  phase: :executing
+                )
+              end
             @cv.wait(@mutex, remaining)
           else
             @cv.wait(@mutex)
@@ -216,6 +251,19 @@ module Troupe
       @mutex.synchronize do
         @wake_seq += 1
         @cv.broadcast
+      end
+    end
+
+    # 排队阶段取消（Issue #7）：按 callId 摘除尚未开始且 cancellable 的 Call（释放字节预算）；
+    # 非 cancellable Call 不受取消影响（行为与旧版本一致）；不在队列则返回 nil
+    def cancel!(call_id)
+      @mutex.synchronize do
+        idx = @q.index { |c| c.call_id == call_id && c.cancellable? }
+        return nil unless idx
+
+        call = @q.delete_at(idx)
+        @budget&.release(call.approx_bytes)
+        call
       end
     end
 

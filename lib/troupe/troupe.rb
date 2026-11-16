@@ -4,6 +4,7 @@ require_relative "util"
 require_relative "errors"
 require_relative "config"
 require_relative "codec"
+require_relative "envelope"
 require_relative "call"
 require_relative "repertoire"
 require_relative "actor"
@@ -114,9 +115,34 @@ module Troupe
       call = Call.new(
         namespace: @config.namespace, role_id: role_class.role_id, stage_name: stage_name,
         method: method, args: args, deadline_ms: Util.now_ms + (timeout_s * 1000).to_i,
-        source: :local
+        source: :local, cancellable: role_class.cancellable?(method)
       )
-      route(call)
+      call.traceparent = TraceContext.new_span # §11.4：随线路跨 Stage 传播（OTel 深接在 M3）
+      begin
+        route(call)
+      rescue ResultUnknownError
+        # 调用方已放弃等待 → 通知目标早停（Issue #7，advisory）；
+        # 仍抛原错误：结果未知 ≠ 失败，取消不伪造结果
+        request_cancel(call)
+        raise
+      end
+    end
+
+    # 取消通知（Issue #7）：排队阶段目标侧整体拒绝；执行阶段协作式 cancelled?。
+    # advisory——不保证到达（与 Orleans 同口径），失败只记日志
+    def request_cancel(call)
+      if @transport.nil?
+        @stage_manager.cancel_call(call.role_id, call.stage_name, call.call_id)
+      else
+        owner = @playbill.owner_address(call.namespace, call.role_id, call.stage_name)
+        if owner.nil? || owner == @transport.advertise
+          @stage_manager.cancel_call(call.role_id, call.stage_name, call.call_id)
+        else
+          @transport.cancel(owner, call.call_id)
+        end
+      end
+    rescue StandardError => e
+      Log.debug("取消通知未送达（advisory，不保证到达）：#{e.class}: #{e.message}")
     end
 
     # 远端落地入口（transport → 这里）
