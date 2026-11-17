@@ -22,6 +22,7 @@ module Troupe
       @db.results_as_hash = false
       @db.execute("PRAGMA journal_mode = WAL")
       @db.execute("PRAGMA synchronous = NORMAL")
+      @db.execute("PRAGMA busy_timeout = 5000") # 跨实现统一口径（进程内 Mutex 之外的文件级写锁等待）
       @db.execute(<<~SQL)
         CREATE TABLE IF NOT EXISTS troupe_props (
           k TEXT PRIMARY KEY,
