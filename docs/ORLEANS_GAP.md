@@ -1,6 +1,6 @@
 # Troupe.rb 与 Orleans 的能力差距
 
-> 对标 Orleans 10.0（参考基线 commit 8320d257，2026-11-14）；统一规划：[troupe-planning](https://github.com/ShiningRay/troupe-planning)。
+> 对标 Orleans 10.0（参考基线 commit 8320d257，2026-11-14）；统一规划：[troupe-planning](https://github.com/ShiningRay/troupe)。
 > 本文 2026-11-16 依据 troupejs（M1–M11 + P0–P3 全部完成，CI 235 passed）与 troupe.cr（M0–M6 全部完成，166 specs）两兄弟实现的实测状态重新校准。
 
 ## 当前定位

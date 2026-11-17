@@ -103,7 +103,7 @@ bundle exec rake test
 - [Orleans 能力差距](docs/ORLEANS_GAP.md)
 - [分阶段实施路线](docs/ROADMAP.md)
 - [当前测试与已知失败](docs/VERIFICATION.md)
-- [统一多语言规划](https://github.com/ShiningRay/troupe-planning)
+- [统一多语言规划](https://github.com/ShiningRay/troupe)
 
 ## 配置（显式传参 > 环境变量 > 约定默认值）
 
