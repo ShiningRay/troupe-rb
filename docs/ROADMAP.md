@@ -75,5 +75,5 @@
 
 - [ ] kwargs RPC 支持与版本化编码（当前不支持；不得引入 Marshal 作公共协议）。
 - [ ] `Troupe::Troupe` 常量遮蔽解决（breaking change，择窗口期；M3 OTel 实现已遇 `Troupe::VERSION` 被解析为 `Troupe::Troupe::VERSION`——库内用 `::Troupe::` 顶层限定规避）。
-- [ ] 线程模型基准对比：thread_per_cell（默认）vs shared 池 vs Fiber 方案，报告**默认配置**数字而非 opt-in 最优（吸取 bench-suite 教训：shared 2.77KB/Actor 与默认 47.52KB 不可混用）。
+- [ ] [#8](https://github.com/ShiningRay/troupe-rb/issues/8) Ruby 4+ 混合并发演进：先补同场 A/B 与空闲线程退场/codec/直接交接消融，再做可选 Async/Fiber + 有界阻塞卸载；CPU 并行独立比较多进程与固定 Ractor 分片。报告**默认配置**与 opt-in 分开，不把 shared 2.77KB/Actor 与默认 47.52KB 混用。完整研究：[Ruby Actor 高并发执行模型](./research/ruby-concurrency.md)。
 - [x] PStore O(全库) 写入问题：限开发并文档声明（README 已知边界 + gemspec 注释明确开发级定位）。
