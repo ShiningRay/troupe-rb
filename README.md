@@ -1,6 +1,6 @@
 # Troupe.rb
 
-[![CI](https://github.com/ShiningRay/troupe/actions/workflows/ci.yml/badge.svg)](https://github.com/ShiningRay/troupe/actions/workflows/ci.yml)
+[![CI](https://github.com/ShiningRay/troupe-rb/actions/workflows/ci.yml/badge.svg)](https://github.com/ShiningRay/troupe-rb/actions/workflows/ci.yml)
 
 > Troupe.js（[DESIGN](../troupejs/DESIGN.md) / [PLAN](../troupejs/PLAN.md)）的 Ruby 版本：面向 Ruby 的 **Virtual Actor** 框架，思想对标 Microsoft Orleans 与 EA Orbit，命名与语义全面沿用"剧团（Troupe）"隐喻。**运行时零第三方 gem 依赖**（logger 为 Ruby 4 bundled gem，已显式声明）。
 

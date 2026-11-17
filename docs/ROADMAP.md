@@ -14,11 +14,11 @@
 
 ## M0 恢复可信基线（最高优先级，先于一切）
 
-- [x] [#1](https://github.com/ShiningRay/troupe/issues/1)：gemspec/Gemfile 声明 Ruby 4 bundled `logger`，更新 lockfile；恢复 `bundle exec rake test` 默认入口。（顺带声明 bigdecimal/pstore——同为 bundled gem，3.4/4.0 同样炸 LoadError）
-- [x] [#4](https://github.com/ShiningRay/troupe/issues/4)：`assert_same nil` → `assert_nil`；README/gemspec 明确 Ruby 支持矩阵（≥3.2）。
-- [x] [#2](https://github.com/ShiningRay/troupe/issues/2)：namespace 显式配置优先；默认值固定 `"default"`（对齐 troupejs）；Rehearsal 同默认；任意目录名下 props/ownership/cluster 全绿 + `ConfigNamespaceTest` 断言预置 Props 读取。
-- [x] [#3](https://github.com/ShiningRay/troupe/issues/3)：迁移逐级 v→v+1 循环执行；补 v1→v3、缺失中间迁移报错、失败不落盘测试；并发迁移沿用 CAS 冲突路径（以已提交版本为准）。
-- [x] [#6](https://github.com/ShiningRay/troupe/issues/6)：Cue 调度改用有界工作池（8 worker + 256 队列深度预算背压），停机 drain；补单 tick 80 条到期全投递 + 停机不泄漏测试。
+- [x] [#1](https://github.com/ShiningRay/troupe-rb/issues/1)：gemspec/Gemfile 声明 Ruby 4 bundled `logger`，更新 lockfile；恢复 `bundle exec rake test` 默认入口。（顺带声明 bigdecimal/pstore——同为 bundled gem，3.4/4.0 同样炸 LoadError）
+- [x] [#4](https://github.com/ShiningRay/troupe-rb/issues/4)：`assert_same nil` → `assert_nil`；README/gemspec 明确 Ruby 支持矩阵（≥3.2）。
+- [x] [#2](https://github.com/ShiningRay/troupe-rb/issues/2)：namespace 显式配置优先；默认值固定 `"default"`（对齐 troupejs）；Rehearsal 同默认；任意目录名下 props/ownership/cluster 全绿 + `ConfigNamespaceTest` 断言预置 Props 读取。
+- [x] [#3](https://github.com/ShiningRay/troupe-rb/issues/3)：迁移逐级 v→v+1 循环执行；补 v1→v3、缺失中间迁移报错、失败不落盘测试；并发迁移沿用 CAS 冲突路径（以已提交版本为准）。
+- [x] [#6](https://github.com/ShiningRay/troupe-rb/issues/6)：Cue 调度改用有界工作池（8 worker + 256 队列深度预算背压），停机 drain；补单 tick 80 条到期全投递 + 停机不泄漏测试。
 - [x] 建立 GitHub Actions：矩阵（Ruby 3.2/3.3/3.4/4.0 × ubuntu/windows）；PG 必跑 leg 留待 M2。
 - [x] README 状态横幅改为 CI badge + 真实测试状态，移除历史「78 runs」宣称。
 
@@ -26,7 +26,7 @@
 
 ## M1 语义对齐（与 js/cr 共同契约）
 
-- [x] [#7](https://github.com/ShiningRay/troupe/issues/7)：协作取消——排队阶段拒绝（CallCancelledError，无副作用）、执行阶段自愿（`cancelled?` 检查点 + `on_cancel` 钩子）；wire 增加 `cancel` 控制帧（`cancellable` 标志随 call 帧传播）；保持「结果未知 ≠ 失败」；非 cancellable 方法行为回归锁死。
+- [x] [#7](https://github.com/ShiningRay/troupe-rb/issues/7)：协作取消——排队阶段拒绝（CallCancelledError，无副作用）、执行阶段自愿（`cancelled?` 检查点 + `on_cancel` 钩子）；wire 增加 `cancel` 控制帧（`cancellable` 标志随 call 帧传播）；保持「结果未知 ≠ 失败」；非 cancellable 方法行为回归锁死。
 - [x] deadline/UnknownOutcome 语义矩阵：`CallTimeoutError#phase` 分离 queued（排队过期=确定性拒绝）/executing（执行超时=结果未知）；deliver 入队过期确定性短路。
 - [x] 错误分类 wire 映射表（对齐 cr `golden/errors.json` 的 code 表）：`Errors::WIRE_CODES` + reason/retryable/phase；出站形状保持 js v2（golden 深比较锚定），入站兼容 cr `{"code":...}`；栈不跨线。
 - [x] 引入 golden fixtures：采纳 troupejs `protocol-v2.json` 向量（xxh32/环分配/traceparent/envelope/wireErr 九项锚定测试全绿）；canonical hash 分叉上报 troupe-planning 出 ADR，不单方面改算法。

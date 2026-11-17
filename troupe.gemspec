@@ -9,7 +9,7 @@ Gem::Specification.new do |s|
   s.description = "面向 Ruby 的 Virtual Actor 框架：永远存在的 Actor、Turn-based 严格串行、" \
                   "Props 持久化、一致性哈希集群、持久提醒。命名与语义对标 Troupe.js（Orleans/Orbit 思想）。"
   s.authors = ["shiningray"]
-  s.homepage = "https://github.com/ShiningRay/troupe"
+  s.homepage = "https://github.com/ShiningRay/troupe-rb"
   s.license = "MIT"
   # 支持矩阵：>= 3.2（CI 矩阵 3.2/3.3/3.4/4.0；Ruby 4 起 logger 降为 bundled gem）
   s.required_ruby_version = ">= 3.2"

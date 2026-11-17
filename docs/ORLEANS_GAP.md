@@ -45,13 +45,13 @@ Ruby 版已有虚拟 Actor、严格串行与可选共享线程池、TCP 路由 +
 
 ## 缺陷 Issues
 
-- [#1 Ruby 4 logger 启动失败](https://github.com/ShiningRay/troupe/issues/1)（2026-11-16 复现）。
-- [#2 Rehearsal namespace 随工作目录漂移](https://github.com/ShiningRay/troupe/issues/2)（根因 `config.rb:26` `File.basename(Dir.pwd)`）。
-- [#3 多级 schema 迁移未逐级执行](https://github.com/ShiningRay/troupe/issues/3)。
-- [#4 Minitest 6 nil 断言与支持矩阵](https://github.com/ShiningRay/troupe/issues/4)。
-- [#5 共享存储与真实故障接管](https://github.com/ShiningRay/troupe/issues/5)。
-- [#6 Cue 调度器每条到期提醒新建线程且无上限](https://github.com/ShiningRay/troupe/issues/6)。
-- [#7 协作式取消缺失](https://github.com/ShiningRay/troupe/issues/7)。
+- [#1 Ruby 4 logger 启动失败](https://github.com/ShiningRay/troupe-rb/issues/1)（2026-11-16 复现）。
+- [#2 Rehearsal namespace 随工作目录漂移](https://github.com/ShiningRay/troupe-rb/issues/2)（根因 `config.rb:26` `File.basename(Dir.pwd)`）。
+- [#3 多级 schema 迁移未逐级执行](https://github.com/ShiningRay/troupe-rb/issues/3)。
+- [#4 Minitest 6 nil 断言与支持矩阵](https://github.com/ShiningRay/troupe-rb/issues/4)。
+- [#5 共享存储与真实故障接管](https://github.com/ShiningRay/troupe-rb/issues/5)。
+- [#6 Cue 调度器每条到期提醒新建线程且无上限](https://github.com/ShiningRay/troupe-rb/issues/6)。
+- [#7 协作式取消缺失](https://github.com/ShiningRay/troupe-rb/issues/7)。
 
 先修 #1–#4、#6 才能重新信任核心验收，再实施 #5、#7；不能根据 README 历史「78 runs」认定当前版本通过。
 

@@ -157,7 +157,7 @@ M0 发现（存档）：pstore/bigdecimal 同为 bundled gem（Ruby 4.0/3.4 降�
 | #3 迁移逐级 v→v+1 | `run_migration` 循环单步调用 `migrate_props(props, v)`；反例测试：v1→v3 步进、缺失中间步骤显式报错、失败不落盘（存储保持 v1 原状）、并发迁移以已提交版本为准（原有 CAS 冲突路径保留） | ✅ |
 | #4 Minitest 断言兼容 | `assert_same nil` → `assert_nil`/`assert_equal`（Minitest 6 直接报错，5.x/6.x 均兼容）；gemspec `required_ruby_version >= 3.2`，README 支持矩阵 | ✅ |
 | #6 Cue 有界投递池 | WORKERS=8 复用线程 + QUEUE_DEPTH=256 预算背压（满则本轮不认领、租约到期重投）；反例测试：单 tick 80 条到期全部投递且线程恒为 8、停机 drain（存量投递完成裁决后 worker 全部退出） | ✅ |
-| CI 矩阵 | `.github/workflows/ci.yml`：Ruby 3.2/3.3/3.4/4.0 × ubuntu/windows，`bundle exec rake test` | ✅ run [43902967558](https://github.com/ShiningRay/troupe/actions/runs/43902967558) 8/8 jobs 全绿（eeee1b5） |
+| CI 矩阵 | `.github/workflows/ci.yml`：Ruby 3.2/3.3/3.4/4.0 × ubuntu/windows，`bundle exec rake test` | ✅ run [43902967558](https://github.com/ShiningRay/troupe-rb/actions/runs/43902967558) 8/8 jobs 全绿（eeee1b5） |
 
 ## 发现并顺带修复（超出 Issue 清单）
 
